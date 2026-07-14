@@ -13,6 +13,7 @@ anything here fails.
 import anthropic
 
 from app.config import ANTHROPIC_MODEL
+from app.services import tool_schemas
 from app.services.tool_decision import ToolDecision
 from app.services.tool_registry import AVAILABLE_TOOLS
 
@@ -22,61 +23,6 @@ _SYSTEM_PROMPT = (
     "it, and call that tool with appropriate arguments. If no tool fits the "
     "message, don't call any tool."
 )
-
-# JSON Schema arguments for each executable tool. This is the one piece of
-# information that doesn't already exist in tool_registry.py (which only
-# has name/description/method/endpoint) - everything else below is reused
-# from there, so tool descriptions aren't duplicated.
-_INPUT_SCHEMAS: dict[str, dict] = {
-    "create_task": {
-        "type": "object",
-        "properties": {"title": {"type": "string", "description": "The task title."}},
-        "required": ["title"],
-    },
-    "list_tasks": {
-        "type": "object",
-        "properties": {
-            "done": {
-                "type": ["boolean", "null"],
-                "description": "Filter by completion status. Omit or null for all tasks.",
-            }
-        },
-    },
-    "get_weather": {
-        "type": "object",
-        "properties": {"city": {"type": "string", "description": "The city to get the weather for."}},
-        "required": ["city"],
-    },
-    "mark_task_done": {
-        "type": "object",
-        "properties": {"task_id": {"type": "integer", "description": "The id of the task to mark done."}},
-        "required": ["task_id"],
-    },
-    "update_task": {
-        "type": "object",
-        "properties": {
-            "task_id": {"type": "integer", "description": "The id of the task to update."},
-            "title": {"type": "string", "description": "The new title for the task."},
-        },
-        "required": ["task_id", "title"],
-    },
-    "delete_task": {
-        "type": "object",
-        "properties": {"task_id": {"type": "integer", "description": "The id of the task to delete."}},
-        "required": ["task_id"],
-    },
-}
-
-# Required arguments and their expected Python types, used to validate
-# Claude's tool call before trusting it.
-_REQUIRED_ARGUMENTS: dict[str, dict[str, type]] = {
-    "create_task": {"title": str},
-    "list_tasks": {},
-    "get_weather": {"city": str},
-    "mark_task_done": {"task_id": int},
-    "update_task": {"task_id": int, "title": str},
-    "delete_task": {"task_id": int},
-}
 
 
 class AnthropicDecisionError(Exception):
@@ -91,19 +37,19 @@ class AnthropicDecisionError(Exception):
 def _build_claude_tools() -> list[dict]:
     """Build Claude's native tool definitions from the existing tool registry.
 
-    Only tools with an argument schema above are included, which limits
-    Claude to exactly the 6 executable tools (e.g. get_task is excluded -
-    it has no schema, since this agent doesn't execute it).
+    Only tools with an argument schema are included, which limits Claude
+    to exactly the 6 executable tools (e.g. get_task is excluded - it
+    has no schema, since this agent doesn't execute it).
     """
     tools = []
     for tool in AVAILABLE_TOOLS:
-        if tool.name not in _INPUT_SCHEMAS:
+        if tool.name not in tool_schemas.TOOL_ARGUMENT_SCHEMAS:
             continue
         tools.append(
             {
                 "name": tool.name,
                 "description": tool.description,
-                "input_schema": _INPUT_SCHEMAS[tool.name],
+                "input_schema": tool_schemas.TOOL_ARGUMENT_SCHEMAS[tool.name],
             }
         )
     return tools
@@ -117,18 +63,12 @@ def _get_client() -> anthropic.Anthropic:
 
 def _parse_tool_use(block) -> ToolDecision:
     tool_name = getattr(block, "name", None)
-    if tool_name not in _REQUIRED_ARGUMENTS:
-        raise AnthropicDecisionError(f"Claude selected an unknown tool: {tool_name!r}.")
-
     arguments = getattr(block, "input", None)
-    if not isinstance(arguments, dict):
-        raise AnthropicDecisionError(f"Claude returned non-dict arguments for '{tool_name}'.")
 
-    for arg_name, expected_type in _REQUIRED_ARGUMENTS[tool_name].items():
-        if arg_name not in arguments:
-            raise AnthropicDecisionError(f"Claude's call to '{tool_name}' is missing required argument '{arg_name}'.")
-        if not isinstance(arguments[arg_name], expected_type):
-            raise AnthropicDecisionError(f"Claude's call to '{tool_name}' has the wrong type for '{arg_name}'.")
+    try:
+        tool_schemas.validate_tool_call(tool_name, arguments)
+    except tool_schemas.ToolCallValidationError as exc:
+        raise AnthropicDecisionError(str(exc)) from exc
 
     return ToolDecision(
         selected_tool=tool_name,

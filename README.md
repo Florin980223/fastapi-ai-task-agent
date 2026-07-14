@@ -17,9 +17,13 @@ pip install -r requirements.txt
 
 Copy `.env.example` to `.env` and fill in your own values. By default the
 agent uses its built-in rule-based decision logic and needs no
-configuration at all. Setting `AGENT_DECISION_PROVIDER=anthropic` (and an
-`ANTHROPIC_API_KEY`) switches it to ask Claude to pick a tool instead,
-falling back to the rule-based logic automatically if that ever fails.
+configuration at all. `AGENT_DECISION_PROVIDER` can instead be set to:
+
+- `anthropic` (and an `ANTHROPIC_API_KEY`) to ask Claude to pick a tool.
+- `ollama` (with a local [Ollama](https://ollama.com) server running,
+  `OLLAMA_BASE_URL` and `OLLAMA_MODEL`) to ask a local model to pick a tool.
+
+Both fall back to the rule-based logic automatically if they ever fail.
 
 ## Run
 

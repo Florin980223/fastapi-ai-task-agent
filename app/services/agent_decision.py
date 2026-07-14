@@ -7,15 +7,17 @@ picks between two providers based on app.config.DECISION_PROVIDER:
   the first tool whose keywords match, then extracts arguments with a
   few simple patterns. No AI/LLM involved.
 - "anthropic": asks Claude to pick a tool (see anthropic_decision_provider.py).
-  If that fails for any reason, this module logs a warning and falls
-  back to the rule-based provider, so the endpoints always get an answer.
+- "ollama": asks a local Ollama model to pick a tool (see ollama_decision_provider.py).
+  If either LLM provider fails for any reason, this module logs a warning
+  and falls back to the rule-based provider, so the endpoints always get
+  an answer.
 """
 
 import logging
 import re
 
 from app.config import DECISION_PROVIDER
-from app.services import anthropic_decision_provider
+from app.services import anthropic_decision_provider, ollama_decision_provider
 from app.services.tool_decision import ToolDecision
 
 logger = logging.getLogger(__name__)
@@ -214,14 +216,19 @@ def _decide_tool_rule_based(message: str) -> ToolDecision:
 def decide_tool(message: str) -> ToolDecision:
     """Decide which tool a message should use - the single entry point routes call.
 
-    Uses the Anthropic provider when configured, falling back to the
-    rule-based provider (the default) if it's not configured or if it
-    fails for any reason.
+    Uses the Anthropic or Ollama provider when configured, falling back
+    to the rule-based provider (the default) if neither is configured
+    or if the configured one fails for any reason.
     """
     if DECISION_PROVIDER == "anthropic":
         try:
             return anthropic_decision_provider.decide_tool(message)
         except anthropic_decision_provider.AnthropicDecisionError as exc:
             logger.warning("Anthropic decision provider failed (%s); falling back to rule-based.", exc)
+    elif DECISION_PROVIDER == "ollama":
+        try:
+            return ollama_decision_provider.decide_tool(message)
+        except ollama_decision_provider.OllamaDecisionError as exc:
+            logger.warning("Ollama decision provider failed (%s); falling back to rule-based.", exc)
 
     return _decide_tool_rule_based(message)
