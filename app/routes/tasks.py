@@ -23,6 +23,14 @@ def create_task(task_in: TaskCreate):
     return task_service.create_task(title=task_in.title, description=task_in.description)
 
 
+@router.get("/{task_id}", response_model=TaskResponse)
+def get_task(task_id: int):
+    task = task_service.find_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
+
 @router.patch("/{task_id}/done", response_model=TaskResponse)
 def mark_task_done(task_id: int):
     task = task_service.mark_task_done(task_id)
