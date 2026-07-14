@@ -41,3 +41,12 @@ class WeatherResponse(BaseModel):
     current_temperature: float
     wind_speed: float
     weather_code: int
+
+
+class ToolResponse(BaseModel):
+    """Shape of a single entry in the GET /agent/tools list."""
+
+    name: str
+    description: str
+    method: str
+    endpoint: str
