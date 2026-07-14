@@ -8,6 +8,8 @@ tools using the existing task/weather services. Both are stand-ins for
 a future version where an actual AI model makes these decisions.
 """
 
+import re
+
 from app.schemas import TaskResponse
 from app.services import task_service, weather_service
 
@@ -160,8 +162,32 @@ def _execute_get_weather(message: str) -> dict:
         return {"error": "The weather service is currently unavailable."}
 
 
+def _extract_task_id(message: str) -> int | None:
+    """Pull a task id out of a message, e.g. "Mark task 1 as done" -> 1.
+
+    Returns the first run of digits found in the message, or None if
+    there are no digits at all.
+    """
+    match = re.search(r"\d+", message)
+    if match is None:
+        return None
+    return int(match.group())
+
+
+def _execute_mark_task_done(message: str) -> dict:
+    task_id = _extract_task_id(message)
+    if task_id is None:
+        return {"error": "Could not find a task id in your message. Please include a task id, e.g. 'mark task 1 as done'."}
+
+    task = task_service.mark_task_done(task_id)
+    if task is None:
+        return {"error": f"Task {task_id} was not found."}
+
+    return _task_to_dict(task)
+
+
 # Tools that are known but not executable yet - they just report that.
-_NOT_IMPLEMENTED_TOOLS = ["update_task", "mark_task_done", "delete_task"]
+_NOT_IMPLEMENTED_TOOLS = ["update_task", "delete_task"]
 
 
 def execute_tool(message: str, selected_tool: str | None) -> dict | list | None:
@@ -178,6 +204,9 @@ def execute_tool(message: str, selected_tool: str | None) -> dict | list | None:
 
     if selected_tool == "get_weather":
         return _execute_get_weather(message)
+
+    if selected_tool == "mark_task_done":
+        return _execute_mark_task_done(message)
 
     if selected_tool in _NOT_IMPLEMENTED_TOOLS:
         return {
