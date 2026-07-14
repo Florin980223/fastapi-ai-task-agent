@@ -1,28 +1,24 @@
-"""The rule-based "decision provider" for the agent.
+"""Decision provider dispatch for the agent, plus the rule-based provider.
 
-Its only job is to turn a user message into a ToolDecision: which
-tool to use, what arguments to call it with, and why. It does NOT run
-any tool itself - see agent_service.py for execution.
-
-This does NOT call any AI/LLM. It just checks the message text for a
-few keywords, in order, and picks the first tool whose keywords match,
-then extracts arguments with a few simple patterns. A future version
-could add an LLM-based decision provider with the exact same
-decide_tool(message) -> ToolDecision signature, and the rest of the
-agent (execution, final-answer generation) would need no changes.
+decide_tool() below is the single entry point routes/agent.py calls. It
+picks between two providers based on app.config.DECISION_PROVIDER:
+- "rule_based" (default): _decide_tool_rule_based, defined in this file.
+  Just checks the message text for a few keywords, in order, and picks
+  the first tool whose keywords match, then extracts arguments with a
+  few simple patterns. No AI/LLM involved.
+- "anthropic": asks Claude to pick a tool (see anthropic_decision_provider.py).
+  If that fails for any reason, this module logs a warning and falls
+  back to the rule-based provider, so the endpoints always get an answer.
 """
 
+import logging
 import re
 
-from pydantic import BaseModel
+from app.config import DECISION_PROVIDER
+from app.services import anthropic_decision_provider
+from app.services.tool_decision import ToolDecision
 
-
-class ToolDecision(BaseModel):
-    """What the decision provider thinks should happen for a message."""
-
-    selected_tool: str | None
-    arguments: dict[str, str | int | bool | None]
-    reason: str
+logger = logging.getLogger(__name__)
 
 
 # Each rule is (tool_name, keywords, reason). Rules are checked in
@@ -208,8 +204,24 @@ def _build_arguments(selected_tool: str | None, message: str) -> dict[str, str |
     return {}
 
 
-def decide_tool(message: str) -> ToolDecision:
+def _decide_tool_rule_based(message: str) -> ToolDecision:
     """Decide which tool (if any) a message should use, and with what arguments."""
     selected_tool, reason = _select_tool(message)
     arguments = _build_arguments(selected_tool, message)
     return ToolDecision(selected_tool=selected_tool, arguments=arguments, reason=reason)
+
+
+def decide_tool(message: str) -> ToolDecision:
+    """Decide which tool a message should use - the single entry point routes call.
+
+    Uses the Anthropic provider when configured, falling back to the
+    rule-based provider (the default) if it's not configured or if it
+    fails for any reason.
+    """
+    if DECISION_PROVIDER == "anthropic":
+        try:
+            return anthropic_decision_provider.decide_tool(message)
+        except anthropic_decision_provider.AnthropicDecisionError as exc:
+            logger.warning("Anthropic decision provider failed (%s); falling back to rule-based.", exc)
+
+    return _decide_tool_rule_based(message)
