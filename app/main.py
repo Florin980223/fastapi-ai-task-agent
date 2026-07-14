@@ -5,11 +5,12 @@ Run with: uvicorn app.main:app --reload
 
 from fastapi import FastAPI
 
-from app.routes import tasks
+from app.routes import integrations, tasks
 
 app = FastAPI(title="FastAPI AI Task Agent")
 
 app.include_router(tasks.router)
+app.include_router(integrations.router)
 
 
 @app.get("/health")

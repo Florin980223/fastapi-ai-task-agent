@@ -29,3 +29,15 @@ class TaskResponse(BaseModel):
     title: str
     description: str | None = None
     done: bool
+
+
+class WeatherResponse(BaseModel):
+    """Shape of the response for GET /integrations/weather."""
+
+    city: str
+    country: str | None = None
+    latitude: float
+    longitude: float
+    current_temperature: float
+    wind_speed: float
+    weather_code: int
