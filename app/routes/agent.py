@@ -67,6 +67,12 @@ def execute(request: ExecuteRequest):
     else:
         decision = agent_decision.decide_tool(message)
 
+    # Fill in a missing task_id from remembered context, but only if the
+    # message explicitly refers back to a prior task ("it", "that task").
+    # A generic incomplete request still asks for clarification below.
+    last_task_id = conversation_memory.get_last_task_id(conversation_id)
+    clarification.resolve_remembered_task_id(decision, last_task_id, message)
+
     missing = clarification.missing_arguments(decision)
     if missing:
         question = clarification.build_clarification_question(decision.selected_tool, missing)
@@ -98,6 +104,7 @@ def execute(request: ExecuteRequest):
 
     conversation_memory.clear(conversation_id)
     result = agent_service.execute_tool(decision)
+    conversation_memory.record_result(conversation_id, decision.selected_tool, result)
     final_answer = agent_service.generate_final_answer(decision.selected_tool, result)
     return ExecuteResponse(
         conversation_id=conversation_id,

@@ -88,6 +88,70 @@ def _extract_integer_from_reply(message: str) -> int | None:
     return int(match.group())
 
 
+# Explicit, deterministic cues that a message refers back to a task
+# mentioned earlier in the conversation, rather than being a generic,
+# standalone request. Covers both the "fresh request" case ("Delete
+# that task") and the "reply to a pending clarification" case ("that
+# one"). Deliberately does NOT include bare words like "task" alone -
+# only pronoun-like references count.
+_REFERENCE_PHRASES = {
+    "it",
+    "that task",
+    "this task",
+    "the previous task",
+    "the last task",
+    "that one",
+    "the previous one",
+    "șterge-l",
+    "marchează-l",
+    "acel task",
+    "acest task",
+    "ultimul task",
+    "acela",
+    "ultimul",
+}
+
+
+def mentions_contextual_reference(message: str) -> bool:
+    """Whether the message contains an explicit cue that it refers back
+    to a task from earlier in the conversation (e.g. "it", "that task",
+    "acela"), rather than being a generic/standalone request.
+
+    Matching is case-insensitive and word-boundary aware, so short
+    phrases like "it" only match as a standalone reference - not as
+    part of another word (e.g. "edit", "item").
+    """
+    lowered = message.lower()
+    return any(re.search(r"\b" + re.escape(phrase) + r"\b", lowered) for phrase in _REFERENCE_PHRASES)
+
+
+def resolve_remembered_task_id(decision: ToolDecision, last_task_id: int | None, message: str) -> None:
+    """Fill in a missing task_id from remembered conversation context -
+    but only when the message explicitly refers back to a prior task.
+
+    Never overwrites a task_id the provider or a parsed reply already
+    supplied (that always wins), and never fires for a generic
+    incomplete request ("Delete a task") just because context happens
+    to be available - the message must contain an explicit reference
+    cue (see mentions_contextual_reference). This keeps a bare
+    incomplete request asking for clarification instead of silently
+    acting on a guessed, possibly-destructive target.
+    """
+    if last_task_id is None or decision.selected_tool is None:
+        return
+
+    if "task_id" not in tool_schemas.REQUIRED_ARGUMENTS.get(decision.selected_tool, {}):
+        return
+
+    if decision.arguments.get("task_id") is not None:
+        return
+
+    if not mentions_contextual_reference(message):
+        return
+
+    decision.arguments["task_id"] = last_task_id
+
+
 def merge_reply(pending: PendingClarification, message: str) -> dict[str, str | int | bool | None]:
     """Deterministically parse a follow-up reply and merge whatever it
     supplies into the pending decision's arguments. Never calls an LLM.
