@@ -186,8 +186,44 @@ def _execute_mark_task_done(message: str) -> dict:
     return _task_to_dict(task)
 
 
+def _extract_new_title(message: str) -> str | None:
+    """Pull the new title out of an update_task message.
+
+    Looks for "<task id> to <new title>", e.g. "Update task 1 to Call
+    Alex tomorrow" -> "Call Alex tomorrow". Anchoring on the digits
+    right before "to" (instead of just the first "to" in the message)
+    means a title that itself contains "to" (e.g. "task 1 to Talk to
+    Bob") is still captured in full. Returns None if no title found.
+    """
+    match = re.search(r"\d+\s+to\s+(.+)", message, re.IGNORECASE)
+    if match is None:
+        return None
+
+    title = match.group(1).strip(" .!?")
+    if not title:
+        return None
+
+    return title
+
+
+def _execute_update_task(message: str) -> dict:
+    task_id = _extract_task_id(message)
+    if task_id is None:
+        return {"error": "Could not find a task id in your message. Please include a task id, e.g. 'update task 1 to New title'."}
+
+    new_title = _extract_new_title(message)
+    if new_title is None:
+        return {"error": "Could not find a new title in your message. Please include a new title, e.g. 'update task 1 to New title'."}
+
+    task = task_service.update_task(task_id, title=new_title, description=None)
+    if task is None:
+        return {"error": f"Task {task_id} was not found."}
+
+    return _task_to_dict(task)
+
+
 # Tools that are known but not executable yet - they just report that.
-_NOT_IMPLEMENTED_TOOLS = ["update_task", "delete_task"]
+_NOT_IMPLEMENTED_TOOLS = ["delete_task"]
 
 
 def execute_tool(message: str, selected_tool: str | None) -> dict | list | None:
@@ -207,6 +243,9 @@ def execute_tool(message: str, selected_tool: str | None) -> dict | list | None:
 
     if selected_tool == "mark_task_done":
         return _execute_mark_task_done(message)
+
+    if selected_tool == "update_task":
+        return _execute_update_task(message)
 
     if selected_tool in _NOT_IMPLEMENTED_TOOLS:
         return {
