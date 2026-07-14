@@ -15,11 +15,23 @@ from app.services import task_service, weather_service
 
 # Each rule is (tool_name, keywords, reason). Rules are checked in
 # order, and the first one whose keyword appears in the message wins.
+#
+# delete_task is checked before create_task on purpose: create_task's
+# "todo" keyword would otherwise also match messages like "Delete todo
+# 3" (which contains the word "todo"), wrongly creating a task instead
+# of deleting one. Putting the more specific "delete"/"remove task"
+# keywords first means a message like that is claimed by delete_task
+# before create_task ever gets a chance to look at it.
 RULES: list[tuple[str, list[str], str]] = [
     (
         "get_weather",
         ["weather", "temperature", "forecast", "city weather"],
         "The user is asking about weather.",
+    ),
+    (
+        "delete_task",
+        ["delete", "remove task"],
+        "The user wants to delete a task.",
     ),
     (
         "create_task",
@@ -40,11 +52,6 @@ RULES: list[tuple[str, list[str], str]] = [
         "mark_task_done",
         ["done", "complete", "finish task", "mark done"],
         "The user wants to mark a task as completed.",
-    ),
-    (
-        "delete_task",
-        ["delete", "remove task"],
-        "The user wants to delete a task.",
     ),
 ]
 
@@ -222,8 +229,23 @@ def _execute_update_task(message: str) -> dict:
     return _task_to_dict(task)
 
 
+def _execute_delete_task(message: str) -> dict:
+    task_id = _extract_task_id(message)
+    if task_id is None:
+        return {"error": "Could not find a task id in your message. Please include a task id, e.g. 'delete task 1'."}
+
+    # delete_task returns True/False instead of a Task, since the task
+    # no longer exists afterwards - there's nothing to convert to a dict.
+    deleted = task_service.delete_task(task_id)
+    if not deleted:
+        return {"error": f"Task {task_id} was not found."}
+
+    return {"status": "deleted", "task_id": task_id}
+
+
 # Tools that are known but not executable yet - they just report that.
-_NOT_IMPLEMENTED_TOOLS = ["delete_task"]
+# (Empty for now - every tool in the registry is executable.)
+_NOT_IMPLEMENTED_TOOLS: list[str] = []
 
 
 def execute_tool(message: str, selected_tool: str | None) -> dict | list | None:
@@ -246,6 +268,9 @@ def execute_tool(message: str, selected_tool: str | None) -> dict | list | None:
 
     if selected_tool == "update_task":
         return _execute_update_task(message)
+
+    if selected_tool == "delete_task":
+        return _execute_delete_task(message)
 
     if selected_tool in _NOT_IMPLEMENTED_TOOLS:
         return {
