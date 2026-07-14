@@ -78,9 +78,11 @@ def decide_tool(request: DecideToolRequest):
 def execute(request: DecideToolRequest):
     selected_tool, reason = agent_service.decide_tool(request.message)
     result = agent_service.execute_tool(request.message, selected_tool)
+    final_answer = agent_service.generate_final_answer(selected_tool, result)
     return ExecuteResponse(
         message=request.message,
         selected_tool=selected_tool,
         result=result,
         reason=reason,
+        final_answer=final_answer,
     )

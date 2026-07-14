@@ -279,3 +279,51 @@ def execute_tool(message: str, selected_tool: str | None) -> dict | list | None:
         }
 
     return None
+
+
+def _describe_task(task: dict) -> str:
+    status = "done" if task["done"] else "pending"
+    return f'#{task["id"]} "{task["title"]}" ({status})'
+
+
+def generate_final_answer(selected_tool: str | None, result: dict | list | None) -> str:
+    """Turn a tool's result into a short, human-readable sentence.
+
+    This is plain string formatting based on the result shapes that
+    execute_tool already produces above - no AI/LLM involved.
+    """
+    if selected_tool is None:
+        return "I couldn't figure out what to do with that message. Could you rephrase it?"
+
+    if isinstance(result, dict) and "error" in result:
+        # Error messages built by the _execute_* helpers are already
+        # complete, user-friendly sentences - just pass them through.
+        return result["error"]
+
+    if isinstance(result, dict) and result.get("status") == "not_implemented":
+        return f"Sorry, '{selected_tool}' isn't supported yet."
+
+    if selected_tool == "create_task":
+        return f'Created task #{result["id"]}: "{result["title"]}".'
+
+    if selected_tool == "mark_task_done":
+        return f'Marked task #{result["id"]} ("{result["title"]}") as done.'
+
+    if selected_tool == "update_task":
+        return f'Updated task #{result["id"]} to "{result["title"]}".'
+
+    if selected_tool == "delete_task":
+        return f'Deleted task #{result["task_id"]}.'
+
+    if selected_tool == "list_tasks":
+        if not result:
+            return "You have no tasks."
+        task_descriptions = ", ".join(_describe_task(task) for task in result)
+        count = len(result)
+        noun = "task" if count == 1 else "tasks"
+        return f"You have {count} {noun}: {task_descriptions}."
+
+    if selected_tool == "get_weather":
+        return f'It\'s currently {result["current_temperature"]}°C in {result["city"]} with wind speed {result["wind_speed"]} km/h.'
+
+    return "Done."

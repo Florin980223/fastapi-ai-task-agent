@@ -73,3 +73,4 @@ class ExecuteResponse(BaseModel):
     selected_tool: str | None = None
     result: dict | list | None = None
     reason: str
+    final_answer: str
