@@ -14,8 +14,8 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 
 
 @router.get("", response_model=list[TaskResponse])
-def get_tasks():
-    return task_service.list_tasks()
+def get_tasks(done: bool | None = None):
+    return task_service.list_tasks(done=done)
 
 
 @router.post("", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)

@@ -8,8 +8,10 @@ and the actual logic in one place.
 from app.models import Task, tasks_db, get_next_id
 
 
-def list_tasks() -> list[Task]:
-    return tasks_db
+def list_tasks(done: bool | None = None) -> list[Task]:
+    if done is None:
+        return tasks_db
+    return [task for task in tasks_db if task.done == done]
 
 
 def create_task(title: str, description: str | None) -> Task:
