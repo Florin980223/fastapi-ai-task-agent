@@ -50,3 +50,17 @@ class ToolResponse(BaseModel):
     description: str
     method: str
     endpoint: str
+
+
+class DecideToolRequest(BaseModel):
+    """Shape of the JSON body expected on POST /agent/decide-tool."""
+
+    message: str
+
+
+class DecideToolResponse(BaseModel):
+    """Shape of the response for POST /agent/decide-tool."""
+
+    message: str
+    selected_tool: str | None = None
+    reason: str

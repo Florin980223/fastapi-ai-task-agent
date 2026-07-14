@@ -8,7 +8,8 @@ the source code.
 
 from fastapi import APIRouter
 
-from app.schemas import ToolResponse
+from app.schemas import DecideToolRequest, DecideToolResponse, ToolResponse
+from app.services import agent_service
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -61,3 +62,13 @@ AVAILABLE_TOOLS: list[ToolResponse] = [
 @router.get("/tools", response_model=list[ToolResponse])
 def get_tools():
     return AVAILABLE_TOOLS
+
+
+@router.post("/decide-tool", response_model=DecideToolResponse)
+def decide_tool(request: DecideToolRequest):
+    selected_tool, reason = agent_service.decide_tool(request.message)
+    return DecideToolResponse(
+        message=request.message,
+        selected_tool=selected_tool,
+        reason=reason,
+    )
