@@ -24,3 +24,7 @@ ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
 # DECISION_PROVIDER is "ollama".
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:4b")
+
+# Where task data is persisted. Defaults to a local SQLite file so the
+# app works out of the box with no extra setup.
+DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./tasks.db")

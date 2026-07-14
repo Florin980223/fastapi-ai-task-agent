@@ -7,7 +7,7 @@ tasks are stored internally.
 
 import uuid
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class TaskCreate(BaseModel):
@@ -26,6 +26,8 @@ class TaskUpdate(BaseModel):
 
 class TaskResponse(BaseModel):
     """Shape of a task as returned by the API."""
+
+    model_config = ConfigDict(from_attributes=True)
 
     id: int
     title: str

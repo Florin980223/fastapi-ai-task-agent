@@ -1,8 +1,8 @@
 # FastAPI AI Task Agent
 
 A small FastAPI backend for managing tasks, built as a learning project.
-This first version uses in-memory storage (no database). It also has a
-small rule-based agent (`/agent/...`) that can optionally use Claude to
+Tasks are persisted in SQLite via SQLAlchemy. It also has a small
+rule-based agent (`/agent/...`) that can optionally use Claude to
 pick which tool to run — see Configuration below.
 
 ## Setup
@@ -25,6 +25,10 @@ configuration at all. `AGENT_DECISION_PROVIDER` can instead be set to:
 
 Both fall back to the rule-based logic automatically if they ever fail.
 
+`DATABASE_URL` controls where task data is persisted. It defaults to a
+local SQLite file (`sqlite:///./tasks.db`) in the project root, created
+automatically the first time the app starts — no setup required.
+
 ## Run
 
 ```bash
@@ -43,5 +47,6 @@ Then open http://127.0.0.1:8000/docs for the interactive API docs (Swagger UI).
 
 ## Notes
 
-- Data is stored in memory only — restarting the server clears all tasks.
-- No database and no AI agent yet; both are planned for later phases.
+- Tasks are persisted in SQLite (see `DATABASE_URL` above) — data survives
+  server restarts. Table creation happens automatically on startup; there
+  are no migrations yet (schema changes require recreating the database).

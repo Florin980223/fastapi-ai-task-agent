@@ -8,8 +8,10 @@ the source code.
 
 import uuid
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
 
+from app.database import get_db
 from app.schemas import DecideToolRequest, DecideToolResponse, ExecuteRequest, ExecuteResponse, ToolResponse
 from app.services import agent_decision, agent_service, clarification, conversation_memory, tool_schemas
 from app.services.conversation_memory import PendingClarification
@@ -35,7 +37,7 @@ def decide_tool(request: DecideToolRequest):
 
 
 @router.post("/execute", response_model=ExecuteResponse)
-def execute(request: ExecuteRequest):
+def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
     conversation_id = request.conversation_id or uuid.uuid4()
     message = request.message
 
@@ -103,7 +105,7 @@ def execute(request: ExecuteRequest):
         tool_schemas.validate_tool_call(decision.selected_tool, decision.arguments)
 
     conversation_memory.clear(conversation_id)
-    result = agent_service.execute_tool(decision)
+    result = agent_service.execute_tool(decision, db)
     conversation_memory.record_result(conversation_id, decision.selected_tool, result)
     final_answer = agent_service.generate_final_answer(decision.selected_tool, result)
     return ExecuteResponse(

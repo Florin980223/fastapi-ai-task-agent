@@ -8,6 +8,8 @@ future AI-based decision provider could replace agent_decision.py
 without any changes here.
 """
 
+from sqlalchemy.orm import Session
+
 from app.schemas import TaskResponse
 from app.services import task_service, weather_service
 from app.services.agent_decision import ToolDecision
@@ -23,13 +25,13 @@ def _task_to_dict(task) -> dict:
     ).model_dump()
 
 
-def _execute_create_task(arguments: dict) -> dict:
-    task = task_service.create_task(title=arguments["title"], description=None)
+def _execute_create_task(db: Session, arguments: dict) -> dict:
+    task = task_service.create_task(db, title=arguments["title"], description=None)
     return _task_to_dict(task)
 
 
-def _execute_list_tasks(arguments: dict) -> list[dict]:
-    tasks = task_service.list_tasks(done=arguments.get("done"))
+def _execute_list_tasks(db: Session, arguments: dict) -> list[dict]:
+    tasks = task_service.list_tasks(db, done=arguments.get("done"))
     return [_task_to_dict(task) for task in tasks]
 
 
@@ -46,19 +48,19 @@ def _execute_get_weather(arguments: dict) -> dict:
         return {"error": "The weather service is currently unavailable."}
 
 
-def _execute_mark_task_done(arguments: dict) -> dict:
+def _execute_mark_task_done(db: Session, arguments: dict) -> dict:
     task_id = arguments.get("task_id")
     if task_id is None:
         return {"error": "Could not find a task id in your message. Please include a task id, e.g. 'mark task 1 as done'."}
 
-    task = task_service.mark_task_done(task_id)
+    task = task_service.mark_task_done(db, task_id)
     if task is None:
         return {"error": f"Task {task_id} was not found."}
 
     return _task_to_dict(task)
 
 
-def _execute_update_task(arguments: dict) -> dict:
+def _execute_update_task(db: Session, arguments: dict) -> dict:
     task_id = arguments.get("task_id")
     if task_id is None:
         return {"error": "Could not find a task id in your message. Please include a task id, e.g. 'update task 1 to New title'."}
@@ -67,21 +69,21 @@ def _execute_update_task(arguments: dict) -> dict:
     if new_title is None:
         return {"error": "Could not find a new title in your message. Please include a new title, e.g. 'update task 1 to New title'."}
 
-    task = task_service.update_task(task_id, title=new_title, description=None)
+    task = task_service.update_task(db, task_id, title=new_title, description=None)
     if task is None:
         return {"error": f"Task {task_id} was not found."}
 
     return _task_to_dict(task)
 
 
-def _execute_delete_task(arguments: dict) -> dict:
+def _execute_delete_task(db: Session, arguments: dict) -> dict:
     task_id = arguments.get("task_id")
     if task_id is None:
         return {"error": "Could not find a task id in your message. Please include a task id, e.g. 'delete task 1'."}
 
     # delete_task returns True/False instead of a Task, since the task
     # no longer exists afterwards - there's nothing to convert to a dict.
-    deleted = task_service.delete_task(task_id)
+    deleted = task_service.delete_task(db, task_id)
     if not deleted:
         return {"error": f"Task {task_id} was not found."}
 
@@ -93,7 +95,7 @@ def _execute_delete_task(arguments: dict) -> dict:
 _NOT_IMPLEMENTED_TOOLS: list[str] = []
 
 
-def execute_tool(decision: ToolDecision) -> dict | list | None:
+def execute_tool(decision: ToolDecision, db: Session) -> dict | list | None:
     """Run the tool selected by a decision, if execution is supported.
 
     Returns a JSON-friendly result (dict or list), or None if there is
@@ -103,22 +105,22 @@ def execute_tool(decision: ToolDecision) -> dict | list | None:
     arguments = decision.arguments
 
     if selected_tool == "create_task":
-        return _execute_create_task(arguments)
+        return _execute_create_task(db, arguments)
 
     if selected_tool == "list_tasks":
-        return _execute_list_tasks(arguments)
+        return _execute_list_tasks(db, arguments)
 
     if selected_tool == "get_weather":
         return _execute_get_weather(arguments)
 
     if selected_tool == "mark_task_done":
-        return _execute_mark_task_done(arguments)
+        return _execute_mark_task_done(db, arguments)
 
     if selected_tool == "update_task":
-        return _execute_update_task(arguments)
+        return _execute_update_task(db, arguments)
 
     if selected_tool == "delete_task":
-        return _execute_delete_task(arguments)
+        return _execute_delete_task(db, arguments)
 
     if selected_tool in _NOT_IMPLEMENTED_TOOLS:
         return {
