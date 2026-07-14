@@ -5,6 +5,8 @@ that what the API accepts/returns can evolve independently of how
 tasks are stored internally.
 """
 
+import uuid
+
 from pydantic import BaseModel
 
 
@@ -66,9 +68,22 @@ class DecideToolResponse(BaseModel):
     reason: str
 
 
+class ExecuteRequest(BaseModel):
+    """Shape of the JSON body expected on POST /agent/execute.
+
+    conversation_id is optional: omit it for a fresh conversation (one
+    will be generated and returned), or pass back the one from a
+    previous response to continue answering a pending clarification.
+    """
+
+    message: str
+    conversation_id: uuid.UUID | None = None
+
+
 class ExecuteResponse(BaseModel):
     """Shape of the response for POST /agent/execute."""
 
+    conversation_id: uuid.UUID
     message: str
     selected_tool: str | None = None
     result: dict | list | None = None

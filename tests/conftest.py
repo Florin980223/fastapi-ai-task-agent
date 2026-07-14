@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.models as models
+import app.services.conversation_memory as conversation_memory
 from app.main import app
 
 
@@ -26,3 +27,15 @@ def reset_tasks_db():
     yield
     models.tasks_db.clear()
     models._next_id = 1
+
+
+@pytest.fixture(autouse=True)
+def reset_conversation_memory():
+    """Reset pending-clarification memory before and after every test.
+
+    conversation_memory._pending is a module-level global, same reason
+    as reset_tasks_db above.
+    """
+    conversation_memory._pending.clear()
+    yield
+    conversation_memory._pending.clear()
