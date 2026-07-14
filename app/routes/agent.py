@@ -8,7 +8,7 @@ the source code.
 
 from fastapi import APIRouter
 
-from app.schemas import DecideToolRequest, DecideToolResponse, ToolResponse
+from app.schemas import DecideToolRequest, DecideToolResponse, ExecuteResponse, ToolResponse
 from app.services import agent_service
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -70,5 +70,17 @@ def decide_tool(request: DecideToolRequest):
     return DecideToolResponse(
         message=request.message,
         selected_tool=selected_tool,
+        reason=reason,
+    )
+
+
+@router.post("/execute", response_model=ExecuteResponse)
+def execute(request: DecideToolRequest):
+    selected_tool, reason = agent_service.decide_tool(request.message)
+    result = agent_service.execute_tool(request.message, selected_tool)
+    return ExecuteResponse(
+        message=request.message,
+        selected_tool=selected_tool,
+        result=result,
         reason=reason,
     )

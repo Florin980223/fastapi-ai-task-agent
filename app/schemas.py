@@ -64,3 +64,12 @@ class DecideToolResponse(BaseModel):
     message: str
     selected_tool: str | None = None
     reason: str
+
+
+class ExecuteResponse(BaseModel):
+    """Shape of the response for POST /agent/execute."""
+
+    message: str
+    selected_tool: str | None = None
+    result: dict | list | None = None
+    reason: str

@@ -1,10 +1,15 @@
-"""Very simple rule-based "tool selection" for user messages.
+"""Very simple rule-based "tool selection" and "tool execution" for
+user messages.
 
-This does NOT call any AI/LLM. It just checks the message text for a
-few keywords, in order, and picks the first tool whose keywords match.
-This is a stand-in for a future version where an actual AI model
-decides which tool to call.
+This does NOT call any AI/LLM. Tool selection just checks the message
+text for a few keywords, in order, and picks the first tool whose
+keywords match. Tool execution then runs a small, hardcoded set of
+tools using the existing task/weather services. Both are stand-ins for
+a future version where an actual AI model makes these decisions.
 """
+
+from app.schemas import TaskResponse
+from app.services import task_service, weather_service
 
 # Each rule is (tool_name, keywords, reason). Rules are checked in
 # order, and the first one whose keyword appears in the message wins.
@@ -55,3 +60,129 @@ def decide_tool(message: str) -> tuple[str | None, str]:
             return tool_name, reason
 
     return None, "No matching tool was found for this message."
+
+
+# Filler phrases to strip when turning a create_task message into a
+# task title, e.g. "Add a task to buy milk" -> "buy milk".
+_TASK_TITLE_FILLER_PHRASES = [
+    "add a task to",
+    "create a task to",
+    "new task to",
+    "todo",
+]
+
+
+def _extract_task_title(message: str) -> str:
+    """Pull a short title out of a create_task message.
+
+    Removes known filler phrases (case-insensitive). If nothing
+    meaningful is left afterwards, falls back to the full message.
+    """
+    title = message
+    lowered = message.lower()
+
+    for phrase in _TASK_TITLE_FILLER_PHRASES:
+        index = lowered.find(phrase)
+        if index != -1:
+            title = title[:index] + title[index + len(phrase):]
+            lowered = title.lower()
+
+    title = title.strip(" .!?")
+
+    # Extraction was too weak (e.g. the whole message was filler words) -
+    # just use the original message as-is.
+    if not title:
+        return message
+
+    return title
+
+
+def _extract_city(message: str) -> str | None:
+    """Pull a city name out of a weather message.
+
+    Looks for patterns like "weather in London" or "forecast for
+    Paris" by taking whatever comes after the last " in " / " for ".
+    Returns None if no city could be found.
+    """
+    cleaned = message.strip().rstrip("?.!")
+    lowered = cleaned.lower()
+
+    for keyword in [" in ", " for "]:
+        index = lowered.rfind(keyword)
+        if index != -1:
+            city = cleaned[index + len(keyword):].strip()
+            if city:
+                return city
+
+    return None
+
+
+def _task_to_dict(task) -> dict:
+    """Convert an internal Task object into a plain JSON-friendly dict."""
+    return TaskResponse(
+        id=task.id,
+        title=task.title,
+        description=task.description,
+        done=task.done,
+    ).model_dump()
+
+
+def _execute_create_task(message: str) -> dict:
+    title = _extract_task_title(message)
+    task = task_service.create_task(title=title, description=None)
+    return _task_to_dict(task)
+
+
+def _execute_list_tasks(message: str) -> list[dict]:
+    lowered = message.lower()
+
+    if "unfinished" in lowered or "incomplete" in lowered or "not done" in lowered:
+        done = False
+    elif "completed" in lowered or "done" in lowered:
+        done = True
+    else:
+        done = None
+
+    tasks = task_service.list_tasks(done=done)
+    return [_task_to_dict(task) for task in tasks]
+
+
+def _execute_get_weather(message: str) -> dict:
+    city = _extract_city(message)
+    if city is None:
+        return {"error": "Could not find a city in your message. Please include a city, e.g. 'weather in London'."}
+
+    try:
+        return weather_service.get_weather_for_city(city)
+    except weather_service.CityNotFoundError:
+        return {"error": f"City '{city}' was not found."}
+    except weather_service.WeatherServiceError:
+        return {"error": "The weather service is currently unavailable."}
+
+
+# Tools that are known but not executable yet - they just report that.
+_NOT_IMPLEMENTED_TOOLS = ["update_task", "mark_task_done", "delete_task"]
+
+
+def execute_tool(message: str, selected_tool: str | None) -> dict | list | None:
+    """Run the tool selected for this message, if execution is supported.
+
+    Returns a JSON-friendly result (dict or list), or None if there is
+    no tool to execute.
+    """
+    if selected_tool == "create_task":
+        return _execute_create_task(message)
+
+    if selected_tool == "list_tasks":
+        return _execute_list_tasks(message)
+
+    if selected_tool == "get_weather":
+        return _execute_get_weather(message)
+
+    if selected_tool in _NOT_IMPLEMENTED_TOOLS:
+        return {
+            "status": "not_implemented",
+            "message": f"Execution for '{selected_tool}' is not implemented yet.",
+        }
+
+    return None
