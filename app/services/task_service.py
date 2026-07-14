@@ -25,6 +25,17 @@ def find_task(task_id: int) -> Task | None:
     return None
 
 
+def update_task(task_id: int, title: str | None, description: str | None) -> Task | None:
+    task = find_task(task_id)
+    if task is None:
+        return None
+    if title is not None:
+        task.title = title
+    if description is not None:
+        task.description = description
+    return task
+
+
 def mark_task_done(task_id: int) -> Task | None:
     task = find_task(task_id)
     if task is None:

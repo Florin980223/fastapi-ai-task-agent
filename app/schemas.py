@@ -15,6 +15,13 @@ class TaskCreate(BaseModel):
     description: str | None = None
 
 
+class TaskUpdate(BaseModel):
+    """Shape of the JSON body expected on PATCH /tasks/{task_id}."""
+
+    title: str | None = None
+    description: str | None = None
+
+
 class TaskResponse(BaseModel):
     """Shape of a task as returned by the API."""
 
