@@ -82,6 +82,33 @@ def test_missing_tool_call_falls_back_to_rule_based(monkeypatch):
     assert decision.arguments == {"task_id": 1}
 
 
+def test_missing_required_argument_does_not_fall_back(monkeypatch):
+    # delete_task requires task_id, which is missing here. This is NOT a
+    # provider failure - Claude correctly picked the tool, it just didn't
+    # have enough info. The decision should be preserved as-is (for the
+    # clarification layer to handle), not discarded via a fallback.
+    response = _fake_response([_tool_use_block("delete_task", {})])
+    monkeypatch.setattr(anthropic_decision_provider, "_get_client", lambda: _FakeClient(response=response))
+
+    decision = anthropic_decision_provider.decide_tool("Delete a task")
+
+    assert decision.selected_tool == "delete_task"
+    assert decision.arguments == {}
+    assert "Claude" in decision.reason
+
+
+def test_wrong_argument_type_falls_back_to_rule_based(monkeypatch):
+    # task_id is present but the wrong type - this IS a provider failure.
+    response = _fake_response([_tool_use_block("delete_task", {"task_id": "not-a-number"})])
+    monkeypatch.setattr(agent_decision, "DECISION_PROVIDER", "anthropic")
+    monkeypatch.setattr(anthropic_decision_provider, "_get_client", lambda: _FakeClient(response=response))
+
+    decision = agent_decision.decide_tool("Delete task 1")
+
+    assert decision.selected_tool == "delete_task"
+    assert decision.arguments == {"task_id": 1}
+
+
 def test_api_exception_falls_back_to_rule_based(monkeypatch):
     monkeypatch.setattr(agent_decision, "DECISION_PROVIDER", "anthropic")
     monkeypatch.setattr(

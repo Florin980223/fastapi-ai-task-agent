@@ -91,11 +91,25 @@ _TASK_TITLE_FILLER_PHRASES = [
 ]
 
 
-def _extract_task_title(message: str) -> str:
+# Bare, content-free ways of asking to create a task, with no actual
+# title in them. If stripping filler phrases leaves one of these
+# untouched, there's no real title to extract - the caller should treat
+# it as missing (see clarification.py) rather than using it verbatim.
+_BARE_CREATE_TASK_PHRASES = {
+    "create a task",
+    "create task",
+    "add a task",
+    "add task",
+    "new task",
+    "todo",
+}
+
+
+def _extract_task_title(message: str) -> str | None:
     """Pull a short title out of a create_task message.
 
-    Removes known filler phrases (case-insensitive). If nothing
-    meaningful is left afterwards, falls back to the full message.
+    Removes known filler phrases (case-insensitive). Returns None if
+    nothing but a bare, content-free command is left afterwards.
     """
     title = message
     lowered = message.lower()
@@ -108,10 +122,8 @@ def _extract_task_title(message: str) -> str:
 
     title = title.strip(" .!?")
 
-    # Extraction was too weak (e.g. the whole message was filler words) -
-    # just use the original message as-is.
-    if not title:
-        return message
+    if not title or title.lower() in _BARE_CREATE_TASK_PHRASES:
+        return None
 
     return title
 

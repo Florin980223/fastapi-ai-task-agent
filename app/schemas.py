@@ -74,3 +74,5 @@ class ExecuteResponse(BaseModel):
     result: dict | list | None = None
     reason: str
     final_answer: str
+    needs_clarification: bool = False
+    clarification_question: str | None = None
