@@ -6,14 +6,25 @@ developer) can discover what actions are available without reading
 the source code.
 """
 
+import time
 import uuid
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.schemas import DecideToolRequest, DecideToolResponse, ExecuteRequest, ExecuteResponse, StepResultResponse, ToolResponse
-from app.services import agent_decision, agent_planner, agent_service, clarification, conversation_memory, tool_schemas
+from app.schemas import (
+    AgentRunDetailResponse,
+    AgentRunSummaryResponse,
+    DecideToolRequest,
+    DecideToolResponse,
+    ExecuteRequest,
+    ExecuteResponse,
+    StepResultResponse,
+    ToolResponse,
+)
+from app.services import agent_decision, agent_planner, agent_service, agent_trace_service, clarification, conversation_memory, tool_schemas
 from app.services.conversation_memory import PendingClarification, PendingConfirmation
 from app.services.tool_decision import ToolDecision
 from app.services.tool_registry import AVAILABLE_TOOLS
@@ -36,23 +47,102 @@ def decide_tool(request: DecideToolRequest):
     )
 
 
+@router.get("/runs", response_model=list[AgentRunSummaryResponse])
+def list_runs(limit: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)):
+    return agent_trace_service.list_runs(db, limit=limit)
+
+
+@router.get("/runs/{run_id}", response_model=AgentRunDetailResponse)
+def get_run(run_id: uuid.UUID, db: Session = Depends(get_db)):
+    run = agent_trace_service.find_run(db, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
+
+
 @router.post("/execute", response_model=ExecuteResponse)
 def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
+    # Every HTTP request gets its own run_id and its own persistent trace
+    # - even a follow-up reply ("yes", a clarification answer) on the same
+    # conversation_id. See agent_trace_service.record_execute_run, called
+    # unconditionally below regardless of which branch returns.
+    run_id = uuid.uuid4()
+    started_at = datetime.now(timezone.utc)
+    started = time.monotonic()
+    single_step_arguments: dict | None = None
+    single_step_duration_ms: int | None = None
+    response: ExecuteResponse | None = None
+
     conversation_id = request.conversation_id or uuid.uuid4()
     message = request.message
 
-    pending_confirmation = conversation_memory.get_confirmation(conversation_id)
+    try:
+        pending_confirmation = conversation_memory.get_confirmation(conversation_id)
 
-    if pending_confirmation is not None:
-        if clarification.is_confirmation_cancellation(message):
+        if pending_confirmation is not None:
+            if clarification.is_confirmation_cancellation(message):
+                conversation_memory.clear_confirmation(conversation_id)
+                response = ExecuteResponse(
+                    run_id=run_id,
+                    conversation_id=conversation_id,
+                    message=message,
+                    selected_tool=None,
+                    result=None,
+                    reason="The pending action was cancelled.",
+                    final_answer="Okay, I cancelled the pending action.",
+                    needs_clarification=False,
+                    clarification_question=None,
+                    needs_confirmation=False,
+                    confirmation_question=None,
+                    is_multi_step=False,
+                    steps=[],
+                )
+                return response
+
+            if not clarification.is_confirmation_reply(message):
+                # Neither a clear yes nor a clear no - keep waiting rather
+                # than guessing, and don't touch any state.
+                response = ExecuteResponse(
+                    run_id=run_id,
+                    conversation_id=conversation_id,
+                    message=message,
+                    selected_tool=pending_confirmation.selected_tool,
+                    result=None,
+                    reason=pending_confirmation.reason,
+                    final_answer=pending_confirmation.question,
+                    needs_clarification=False,
+                    clarification_question=None,
+                    needs_confirmation=True,
+                    confirmation_question=pending_confirmation.question,
+                    is_multi_step=False,
+                    steps=[],
+                )
+                return response
+
+            # Confirmed - revalidate the stored decision immediately before
+            # executing it, then run it exactly like any other complete
+            # decision below.
             conversation_memory.clear_confirmation(conversation_id)
-            return ExecuteResponse(
+            decision = ToolDecision(
+                selected_tool=pending_confirmation.selected_tool,
+                arguments=pending_confirmation.arguments,
+                reason=pending_confirmation.reason,
+            )
+            tool_schemas.validate_tool_call(decision.selected_tool, decision.arguments)
+            step_started = time.monotonic()
+            result = agent_service.execute_tool(decision, db)
+            single_step_duration_ms = int((time.monotonic() - step_started) * 1000)
+            single_step_arguments = decision.arguments
+            conversation_memory.record_result(conversation_id, decision.selected_tool, result)
+            final_answer = agent_service.generate_final_answer(decision.selected_tool, result)
+            response = ExecuteResponse(
+                run_id=run_id,
                 conversation_id=conversation_id,
                 message=message,
-                selected_tool=None,
-                result=None,
-                reason="The pending action was cancelled.",
-                final_answer="Okay, I cancelled the pending action.",
+                selected_tool=decision.selected_tool,
+                result=result,
+                reason=decision.reason,
+                final_answer=final_answer,
                 needs_clarification=False,
                 clarification_question=None,
                 needs_confirmation=False,
@@ -60,39 +150,167 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
                 is_multi_step=False,
                 steps=[],
             )
+            return response
 
-        if not clarification.is_confirmation_reply(message):
-            # Neither a clear yes nor a clear no - keep waiting rather
-            # than guessing, and don't touch any state.
-            return ExecuteResponse(
+        pending = conversation_memory.get(conversation_id)
+
+        if pending is not None:
+            if clarification.is_cancellation(message):
+                conversation_memory.clear(conversation_id)
+                response = ExecuteResponse(
+                    run_id=run_id,
+                    conversation_id=conversation_id,
+                    message=message,
+                    selected_tool=None,
+                    result=None,
+                    reason="The pending action was cancelled.",
+                    final_answer="Okay, I cancelled the pending action.",
+                    needs_clarification=False,
+                    clarification_question=None,
+                    needs_confirmation=False,
+                    confirmation_question=None,
+                    is_multi_step=False,
+                    steps=[],
+                )
+                return response
+
+            # A pending clarification exists - parse this reply deterministically
+            # and merge it in. No LLM provider is consulted for a bare reply
+            # like "3".
+            merged_arguments = clarification.merge_reply(pending, message)
+            decision = ToolDecision(
+                selected_tool=pending.selected_tool,
+                arguments=merged_arguments,
+                reason=pending.reason,
+            )
+        else:
+            if agent_planner.should_attempt_planning(message):
+                plan = agent_planner.decide_plan(message)
+                if plan is not None:
+                    step_results = agent_planner.execute_plan(plan, db, conversation_id)
+                    response = ExecuteResponse(
+                        run_id=run_id,
+                        conversation_id=conversation_id,
+                        message=message,
+                        selected_tool=None,
+                        result=None,
+                        reason=agent_planner.build_plan_reason(step_results, len(plan.steps)),
+                        final_answer=agent_planner.build_plan_final_answer(step_results),
+                        needs_clarification=False,
+                        clarification_question=None,
+                        needs_confirmation=False,
+                        confirmation_question=None,
+                        is_multi_step=True,
+                        steps=[StepResultResponse(**r.model_dump()) for r in step_results],
+                    )
+                    return response
+                # Planning was attempted (the message looked multi-step) but
+                # failed or produced an invalid/disallowed plan. Do NOT fall
+                # back to deciding a single tool from this (possibly
+                # multi-action) message - that could silently execute only a
+                # fragment of what was asked. Stop cleanly instead.
+                response = ExecuteResponse(
+                    run_id=run_id,
+                    conversation_id=conversation_id,
+                    message=message,
+                    selected_tool=None,
+                    result=None,
+                    reason="Multi-step planning did not produce a valid, safe plan.",
+                    final_answer="I couldn't create a safe multi-step plan. Please rephrase the request.",
+                    needs_clarification=False,
+                    clarification_question=None,
+                    needs_confirmation=False,
+                    confirmation_question=None,
+                    is_multi_step=True,
+                    steps=[],
+                )
+                return response
+            decision = agent_decision.decide_tool(message)
+
+        # Fill in a missing task_id from remembered context, but only if the
+        # message explicitly refers back to a prior task ("it", "that task").
+        # A generic incomplete request still asks for clarification below.
+        last_task_id = conversation_memory.get_last_task_id(conversation_id)
+        clarification.resolve_remembered_task_id(decision, last_task_id, message)
+
+        missing = clarification.missing_arguments(decision)
+        if missing:
+            question = clarification.build_clarification_question(decision.selected_tool, missing)
+            conversation_memory.set(
+                conversation_id,
+                PendingClarification(
+                    selected_tool=decision.selected_tool,
+                    arguments=decision.arguments,
+                    reason=decision.reason,
+                    missing=missing,
+                ),
+            )
+            response = ExecuteResponse(
+                run_id=run_id,
                 conversation_id=conversation_id,
                 message=message,
-                selected_tool=pending_confirmation.selected_tool,
+                selected_tool=decision.selected_tool,
                 result=None,
-                reason=pending_confirmation.reason,
-                final_answer=pending_confirmation.question,
-                needs_clarification=False,
-                clarification_question=None,
-                needs_confirmation=True,
-                confirmation_question=pending_confirmation.question,
+                reason=clarification.build_reason(decision.selected_tool, missing),
+                final_answer=question,
+                needs_clarification=True,
+                clarification_question=question,
+                needs_confirmation=False,
+                confirmation_question=None,
                 is_multi_step=False,
                 steps=[],
             )
+            return response
 
-        # Confirmed - revalidate the stored decision immediately before
-        # executing it, then run it exactly like any other complete
-        # decision below.
-        conversation_memory.clear_confirmation(conversation_id)
-        decision = ToolDecision(
-            selected_tool=pending_confirmation.selected_tool,
-            arguments=pending_confirmation.arguments,
-            reason=pending_confirmation.reason,
-        )
-        tool_schemas.validate_tool_call(decision.selected_tool, decision.arguments)
+        # Complete decision - validate it the same way a provider decision
+        # would be (skipped when no tool was selected at all, since that's
+        # not a real tool call to validate).
+        if decision.selected_tool is not None:
+            tool_schemas.validate_tool_call(decision.selected_tool, decision.arguments)
+
+        # The decision is fully resolved now (no missing arguments), whether
+        # it goes on to execute immediately or wait for confirmation below -
+        # either way, any pending clarification for this conversation is done.
+        conversation_memory.clear(conversation_id)
+
+        # Destructive tools don't execute yet - park the decision and ask
+        # the user to explicitly confirm it first.
+        if clarification.requires_confirmation(decision.selected_tool):
+            question = clarification.build_confirmation_question(decision)
+            conversation_memory.set_confirmation(
+                conversation_id,
+                PendingConfirmation(
+                    selected_tool=decision.selected_tool,
+                    arguments=decision.arguments,
+                    reason=decision.reason,
+                    question=question,
+                ),
+            )
+            response = ExecuteResponse(
+                run_id=run_id,
+                conversation_id=conversation_id,
+                message=message,
+                selected_tool=decision.selected_tool,
+                result=None,
+                reason=decision.reason,
+                final_answer=question,
+                needs_clarification=False,
+                clarification_question=None,
+                needs_confirmation=True,
+                confirmation_question=question,
+                is_multi_step=False,
+                steps=[],
+            )
+            return response
+
+        step_started = time.monotonic()
         result = agent_service.execute_tool(decision, db)
+        single_step_duration_ms = int((time.monotonic() - step_started) * 1000)
+        single_step_arguments = decision.arguments
         conversation_memory.record_result(conversation_id, decision.selected_tool, result)
         final_answer = agent_service.generate_final_answer(decision.selected_tool, result)
-        return ExecuteResponse(
+        response = ExecuteResponse(
+            run_id=run_id,
             conversation_id=conversation_id,
             message=message,
             selected_tool=decision.selected_tool,
@@ -106,162 +324,16 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
             is_multi_step=False,
             steps=[],
         )
-
-    pending = conversation_memory.get(conversation_id)
-
-    if pending is not None:
-        if clarification.is_cancellation(message):
-            conversation_memory.clear(conversation_id)
-            return ExecuteResponse(
-                conversation_id=conversation_id,
-                message=message,
-                selected_tool=None,
-                result=None,
-                reason="The pending action was cancelled.",
-                final_answer="Okay, I cancelled the pending action.",
-                needs_clarification=False,
-                clarification_question=None,
-                needs_confirmation=False,
-                confirmation_question=None,
-                is_multi_step=False,
-                steps=[],
-            )
-
-        # A pending clarification exists - parse this reply deterministically
-        # and merge it in. No LLM provider is consulted for a bare reply
-        # like "3".
-        merged_arguments = clarification.merge_reply(pending, message)
-        decision = ToolDecision(
-            selected_tool=pending.selected_tool,
-            arguments=merged_arguments,
-            reason=pending.reason,
-        )
-    else:
-        if agent_planner.should_attempt_planning(message):
-            plan = agent_planner.decide_plan(message)
-            if plan is not None:
-                step_results = agent_planner.execute_plan(plan, db, conversation_id)
-                return ExecuteResponse(
-                    conversation_id=conversation_id,
-                    message=message,
-                    selected_tool=None,
-                    result=None,
-                    reason=agent_planner.build_plan_reason(step_results, len(plan.steps)),
-                    final_answer=agent_planner.build_plan_final_answer(step_results),
-                    needs_clarification=False,
-                    clarification_question=None,
-                    needs_confirmation=False,
-                    confirmation_question=None,
-                    is_multi_step=True,
-                    steps=[StepResultResponse(**r.model_dump()) for r in step_results],
-                )
-            # Planning was attempted (the message looked multi-step) but
-            # failed or produced an invalid/disallowed plan. Do NOT fall
-            # back to deciding a single tool from this (possibly
-            # multi-action) message - that could silently execute only a
-            # fragment of what was asked. Stop cleanly instead.
-            return ExecuteResponse(
-                conversation_id=conversation_id,
-                message=message,
-                selected_tool=None,
-                result=None,
-                reason="Multi-step planning did not produce a valid, safe plan.",
-                final_answer="I couldn't create a safe multi-step plan. Please rephrase the request.",
-                needs_clarification=False,
-                clarification_question=None,
-                needs_confirmation=False,
-                confirmation_question=None,
-                is_multi_step=True,
-                steps=[],
-            )
-        decision = agent_decision.decide_tool(message)
-
-    # Fill in a missing task_id from remembered context, but only if the
-    # message explicitly refers back to a prior task ("it", "that task").
-    # A generic incomplete request still asks for clarification below.
-    last_task_id = conversation_memory.get_last_task_id(conversation_id)
-    clarification.resolve_remembered_task_id(decision, last_task_id, message)
-
-    missing = clarification.missing_arguments(decision)
-    if missing:
-        question = clarification.build_clarification_question(decision.selected_tool, missing)
-        conversation_memory.set(
-            conversation_id,
-            PendingClarification(
-                selected_tool=decision.selected_tool,
-                arguments=decision.arguments,
-                reason=decision.reason,
-                missing=missing,
-            ),
-        )
-        return ExecuteResponse(
+        return response
+    finally:
+        agent_trace_service.record_execute_run(
+            run_id=run_id,
             conversation_id=conversation_id,
             message=message,
-            selected_tool=decision.selected_tool,
-            result=None,
-            reason=clarification.build_reason(decision.selected_tool, missing),
-            final_answer=question,
-            needs_clarification=True,
-            clarification_question=question,
-            needs_confirmation=False,
-            confirmation_question=None,
-            is_multi_step=False,
-            steps=[],
+            decision_provider=agent_decision.DECISION_PROVIDER,
+            started_at=started_at,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            response=response,
+            single_step_arguments=single_step_arguments,
+            single_step_duration_ms=single_step_duration_ms,
         )
-
-    # Complete decision - validate it the same way a provider decision
-    # would be (skipped when no tool was selected at all, since that's
-    # not a real tool call to validate).
-    if decision.selected_tool is not None:
-        tool_schemas.validate_tool_call(decision.selected_tool, decision.arguments)
-
-    # The decision is fully resolved now (no missing arguments), whether
-    # it goes on to execute immediately or wait for confirmation below -
-    # either way, any pending clarification for this conversation is done.
-    conversation_memory.clear(conversation_id)
-
-    # Destructive tools don't execute yet - park the decision and ask
-    # the user to explicitly confirm it first.
-    if clarification.requires_confirmation(decision.selected_tool):
-        question = clarification.build_confirmation_question(decision)
-        conversation_memory.set_confirmation(
-            conversation_id,
-            PendingConfirmation(
-                selected_tool=decision.selected_tool,
-                arguments=decision.arguments,
-                reason=decision.reason,
-                question=question,
-            ),
-        )
-        return ExecuteResponse(
-            conversation_id=conversation_id,
-            message=message,
-            selected_tool=decision.selected_tool,
-            result=None,
-            reason=decision.reason,
-            final_answer=question,
-            needs_clarification=False,
-            clarification_question=None,
-            needs_confirmation=True,
-            confirmation_question=question,
-            is_multi_step=False,
-            steps=[],
-        )
-
-    result = agent_service.execute_tool(decision, db)
-    conversation_memory.record_result(conversation_id, decision.selected_tool, result)
-    final_answer = agent_service.generate_final_answer(decision.selected_tool, result)
-    return ExecuteResponse(
-        conversation_id=conversation_id,
-        message=message,
-        selected_tool=decision.selected_tool,
-        result=result,
-        reason=decision.reason,
-        final_answer=final_answer,
-        needs_clarification=False,
-        clarification_question=None,
-        needs_confirmation=False,
-        confirmation_question=None,
-        is_multi_step=False,
-        steps=[],
-    )

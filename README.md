@@ -54,6 +54,31 @@ Then open http://127.0.0.1:8000/docs for the interactive API docs (Swagger UI).
 - `PATCH /tasks/{task_id}/done` — mark a task as done.
 - `DELETE /tasks/{task_id}` — delete a task.
 
+## Observability
+
+Every `POST /agent/execute` request gets its own `run_id` (included in the
+response) and a persistent trace in SQLite - what was asked, which decision
+provider was configured, whether it was single- or multi-step, how it
+ended (`success`, `partial`, `clarification_required`,
+`confirmation_required`, `cancelled`, `no_tool`, or `error`), how long it
+took, and one ordered step trace per tool that actually ran. A follow-up
+reply (a clarification answer, a "yes"/"no" confirmation) is a new HTTP
+request and gets its own `run_id`, linked to earlier ones only through the
+shared `conversation_id`.
+
+- `GET /agent/runs?limit=20` — the most recent runs (`limit` is capped at
+  100).
+- `GET /agent/runs/{run_id}` — one run's full detail, including its
+  ordered step traces.
+
+Tracing writes go through a completely separate database session/
+transaction from the one handling the request's actual task operation, and
+any failure there is only ever logged as a warning - it can never roll
+back, invalidate, or otherwise affect a successful task operation or the
+API response. No API keys, headers, or environment secrets are ever
+recorded; large tool results are stored as a bounded summary rather than
+in full.
+
 ## Notes
 
 - Tasks are persisted in SQLite (see `DATABASE_URL` above) — data survives

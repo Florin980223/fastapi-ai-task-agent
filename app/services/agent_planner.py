@@ -24,6 +24,7 @@ Two outcomes are deliberately kept distinct rather than collapsed into one
 
 import logging
 import re
+import time
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -241,6 +242,7 @@ def execute_plan(plan: AgentPlan, db: Session, conversation_id: UUID) -> list[St
     results: list[StepResult] = []
 
     for index, step in enumerate(plan.steps, start=1):
+        step_started = time.monotonic()
         arguments = _resolve_step_arguments(step, results)
         if arguments is None:
             results.append(
@@ -249,6 +251,7 @@ def execute_plan(plan: AgentPlan, db: Session, conversation_id: UUID) -> list[St
                     tool=step.tool,
                     arguments=step.arguments,
                     status="stopped",
+                    duration_ms=int((time.monotonic() - step_started) * 1000),
                     error="Could not resolve the referenced task id from an earlier step.",
                 )
             )
@@ -264,6 +267,7 @@ def execute_plan(plan: AgentPlan, db: Session, conversation_id: UUID) -> list[St
                     tool=step.tool,
                     arguments=arguments,
                     status="stopped",
+                    duration_ms=int((time.monotonic() - step_started) * 1000),
                     error=f"Missing required argument(s): {', '.join(missing)}.",
                 )
             )
@@ -276,6 +280,7 @@ def execute_plan(plan: AgentPlan, db: Session, conversation_id: UUID) -> list[St
                     tool=step.tool,
                     arguments=arguments,
                     status="stopped",
+                    duration_ms=int((time.monotonic() - step_started) * 1000),
                     error=f"'{step.tool}' requires confirmation and cannot run inside a multi-step plan.",
                 )
             )
@@ -285,20 +290,38 @@ def execute_plan(plan: AgentPlan, db: Session, conversation_id: UUID) -> list[St
             tool_schemas.validate_tool_call(step.tool, arguments)
         except tool_schemas.ToolCallValidationError as exc:
             results.append(
-                StepResult(step=index, tool=step.tool, arguments=arguments, status="stopped", error=str(exc))
+                StepResult(
+                    step=index,
+                    tool=step.tool,
+                    arguments=arguments,
+                    status="stopped",
+                    duration_ms=int((time.monotonic() - step_started) * 1000),
+                    error=str(exc),
+                )
             )
             break
 
         result = agent_service.execute_tool(decision, db)
         conversation_memory.record_result(conversation_id, step.tool, result)
+        duration_ms = int((time.monotonic() - step_started) * 1000)
 
         if isinstance(result, dict) and "error" in result:
             results.append(
-                StepResult(step=index, tool=step.tool, arguments=arguments, status="error", result=result, error=result["error"])
+                StepResult(
+                    step=index,
+                    tool=step.tool,
+                    arguments=arguments,
+                    status="error",
+                    duration_ms=duration_ms,
+                    result=result,
+                    error=result["error"],
+                )
             )
             break
 
-        results.append(StepResult(step=index, tool=step.tool, arguments=arguments, status="success", result=result))
+        results.append(
+            StepResult(step=index, tool=step.tool, arguments=arguments, status="success", duration_ms=duration_ms, result=result)
+        )
 
     return results
 

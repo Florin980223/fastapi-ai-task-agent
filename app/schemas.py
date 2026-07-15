@@ -6,8 +6,9 @@ tasks are stored internally.
 """
 
 import uuid
+from datetime import datetime, timezone
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class TaskCreate(BaseModel):
@@ -89,6 +90,7 @@ class StepResultResponse(BaseModel):
     tool: str
     arguments: dict
     status: str
+    duration_ms: int
     result: dict | list | None = None
     error: str | None = None
 
@@ -96,6 +98,7 @@ class StepResultResponse(BaseModel):
 class ExecuteResponse(BaseModel):
     """Shape of the response for POST /agent/execute."""
 
+    run_id: uuid.UUID
     conversation_id: uuid.UUID
     message: str
     selected_tool: str | None = None
@@ -108,3 +111,52 @@ class ExecuteResponse(BaseModel):
     confirmation_question: str | None = None
     is_multi_step: bool = False
     steps: list[StepResultResponse] = Field(default_factory=list)
+
+
+class AgentRunStepResponse(BaseModel):
+    """Shape of a single step trace in GET /agent/runs/{run_id}."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    step_number: int
+    tool: str
+    arguments_json: str
+    status: str
+    duration_ms: int
+    error: str | None = None
+    result_summary: str | None = None
+
+
+class AgentRunSummaryResponse(BaseModel):
+    """Shape of a single entry in GET /agent/runs."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    run_id: uuid.UUID
+    conversation_id: uuid.UUID
+    message: str
+    decision_provider: str
+    is_multi_step: bool
+    status: str
+    selected_tool: str | None = None
+    started_at: datetime
+    finished_at: datetime
+    duration_ms: int
+    error: str | None = None
+
+    @field_validator("started_at", "finished_at")
+    @classmethod
+    def _ensure_utc(cls, value: datetime) -> datetime:
+        # SQLite drops tzinfo on round-trip even for a DateTime(timezone=True)
+        # column - values are always written as UTC (see
+        # agent_trace_service), so a naive value read back is re-tagged as
+        # UTC rather than left ambiguous.
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+class AgentRunDetailResponse(AgentRunSummaryResponse):
+    """Shape of the response for GET /agent/runs/{run_id} - the summary
+    plus ordered step traces.
+    """
+
+    steps: list[AgentRunStepResponse] = Field(default_factory=list)

@@ -13,6 +13,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import app.database as database
 import app.services.conversation_memory as conversation_memory
 from app.database import Base, get_db
 from app.main import app
@@ -39,6 +40,14 @@ def _override_get_db():
 
 
 app.dependency_overrides[get_db] = _override_get_db
+
+# agent_trace_service deliberately opens its own database.SessionLocal()
+# session (never the request's injected db) so a tracing failure can
+# never touch the request's own transaction. Rebinding the module-level
+# SessionLocal itself (not just the get_db dependency) here means that
+# independent session also lands on this same isolated in-memory test
+# database instead of a second, untracked :memory: database.
+database.SessionLocal = TestSessionLocal
 
 
 @pytest.fixture

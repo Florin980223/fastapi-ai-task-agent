@@ -59,5 +59,6 @@ class StepResult(BaseModel):
     tool: str
     arguments: dict[str, str | int | bool | None]
     status: Literal["success", "error", "stopped"]
+    duration_ms: int
     result: dict | list | None = None
     error: str | None = None
