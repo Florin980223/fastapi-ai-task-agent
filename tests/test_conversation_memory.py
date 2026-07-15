@@ -30,8 +30,17 @@ def test_delete_task_clarification_followed_by_id(client):
     answered = _execute(client, str(task_id), conversation_id=conversation_id)
 
     assert answered["needs_clarification"] is False
+    assert answered["needs_confirmation"] is True
     assert answered["selected_tool"] == "delete_task"
-    assert answered["result"] == {"status": "deleted", "task_id": task_id}
+    assert answered["result"] is None
+    # Not executed yet.
+    assert client.get("/tasks").json() != []
+
+    confirmed = _execute(client, "yes", conversation_id=conversation_id)
+
+    assert confirmed["needs_confirmation"] is False
+    assert confirmed["selected_tool"] == "delete_task"
+    assert confirmed["result"] == {"status": "deleted", "task_id": task_id}
     assert client.get("/tasks").json() == []
 
 
@@ -128,6 +137,7 @@ def test_pending_state_clears_after_successful_execution(client):
     asked = _execute(client, "Delete a task")
     conversation_id = asked["conversation_id"]
     _execute(client, str(task_id), conversation_id=conversation_id)
+    _execute(client, "yes", conversation_id=conversation_id)
 
     # A later, unrelated message on the same conversation_id must go
     # through the normal provider flow, not be treated as another
@@ -153,7 +163,12 @@ def test_two_conversation_ids_stay_isolated(client):
     answered_a = _execute(client, "5", conversation_id=conversation_a)
     assert answered_a["selected_tool"] == "delete_task"
     assert answered_a["needs_clarification"] is False
-    assert answered_a["result"] == {"error": "Task 5 was not found."}
+    assert answered_a["needs_confirmation"] is True
+    assert answered_a["result"] is None
+
+    confirmed_a = _execute(client, "yes", conversation_id=conversation_a)
+    assert confirmed_a["needs_confirmation"] is False
+    assert confirmed_a["result"] == {"error": "Task 5 was not found."}
 
 
 def test_generated_conversation_id_is_returned(client):

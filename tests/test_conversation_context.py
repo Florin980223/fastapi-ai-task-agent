@@ -38,9 +38,14 @@ def test_delete_that_task_uses_remembered_context(client):
     conversation_id = created["conversation_id"]
     task_id = created["result"]["id"]
 
-    data = _execute(client, "Delete that task", conversation_id=conversation_id)
+    asked = _execute(client, "Delete that task", conversation_id=conversation_id)
 
-    assert data["needs_clarification"] is False
+    assert asked["needs_clarification"] is False
+    assert asked["needs_confirmation"] is True
+    assert asked["selected_tool"] == "delete_task"
+
+    data = _execute(client, "yes", conversation_id=conversation_id)
+
     assert data["selected_tool"] == "delete_task"
     assert data["result"] == {"status": "deleted", "task_id": task_id}
     assert client.get("/tasks").json() == []
@@ -123,6 +128,7 @@ def test_deleting_the_remembered_task_clears_the_reference(client):
     conversation_id = created["conversation_id"]
 
     _execute(client, "Delete it", conversation_id=conversation_id)
+    _execute(client, "yes", conversation_id=conversation_id)
 
     data = _execute(client, "Mark it as done", conversation_id=conversation_id)
 
@@ -142,7 +148,9 @@ def test_deleting_a_different_explicit_task_does_not_clear_remembered_context(cl
     assert other_id != remembered_id
 
     # Explicitly delete the OTHER (non-remembered) task.
-    deleted = _execute(client, f"Delete task {other_id}", conversation_id=conversation_id)
+    asked = _execute(client, f"Delete task {other_id}", conversation_id=conversation_id)
+    assert asked["needs_confirmation"] is True
+    deleted = _execute(client, "yes", conversation_id=conversation_id)
     assert deleted["result"] == {"status": "deleted", "task_id": other_id}
 
     # The original remembered task is untouched by that deletion, so a
@@ -191,7 +199,11 @@ def test_referential_pending_reply_uses_context(client):
     reply = _execute(client, "that one", conversation_id=conversation_id)
 
     assert reply["needs_clarification"] is False
-    assert reply["result"] == {"status": "deleted", "task_id": task_id}
+    assert reply["needs_confirmation"] is True
+    assert reply["result"] is None
+
+    confirmed = _execute(client, "yes", conversation_id=conversation_id)
+    assert confirmed["result"] == {"status": "deleted", "task_id": task_id}
 
 
 def test_existing_numeric_pending_reply_flow_still_works(client):
@@ -205,7 +217,11 @@ def test_existing_numeric_pending_reply_flow_still_works(client):
     answered = _execute(client, str(task_id), conversation_id=conversation_id)
 
     assert answered["needs_clarification"] is False
-    assert answered["result"] == {"status": "deleted", "task_id": task_id}
+    assert answered["needs_confirmation"] is True
+    assert answered["result"] is None
+
+    confirmed = _execute(client, "yes", conversation_id=conversation_id)
+    assert confirmed["result"] == {"status": "deleted", "task_id": task_id}
 
 
 @pytest.mark.parametrize(

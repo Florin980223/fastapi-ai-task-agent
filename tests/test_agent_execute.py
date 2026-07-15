@@ -1,9 +1,12 @@
 """Tests for POST /agent/execute, including the final_answer field."""
 
 
-def _execute(client, message):
+def _execute(client, message, conversation_id=None):
     """POST a message to /agent/execute and return the parsed JSON body."""
-    response = client.post("/agent/execute", json={"message": message})
+    body = {"message": message}
+    if conversation_id is not None:
+        body["conversation_id"] = conversation_id
+    response = client.post("/agent/execute", json=body)
     assert response.status_code == 200
     return response.json()
 
@@ -56,17 +59,29 @@ def test_delete_todo_message_is_recognized_as_delete_task(client):
     _execute(client, "Add a task to walk the dog")
     _execute(client, "Add a task to read a book")
 
-    data = _execute(client, "Delete todo 3")
+    asked = _execute(client, "Delete todo 3")
+
+    assert asked["selected_tool"] == "delete_task"
+    assert asked["needs_confirmation"] is True
+    assert asked["result"] is None
+
+    data = _execute(client, "yes", conversation_id=asked["conversation_id"])
 
     assert data["selected_tool"] == "delete_task"
+    assert data["needs_confirmation"] is False
     assert data["result"] == {"status": "deleted", "task_id": 3}
     assert data["final_answer"]
 
 
 def test_deleting_missing_task_returns_friendly_final_answer(client):
-    data = _execute(client, "Delete task 999")
+    asked = _execute(client, "Delete task 999")
+
+    assert asked["needs_confirmation"] is True
+
+    data = _execute(client, "yes", conversation_id=asked["conversation_id"])
 
     assert data["selected_tool"] == "delete_task"
+    assert data["needs_confirmation"] is False
     assert data["result"] == {"error": "Task 999 was not found."}
     assert data["final_answer"] == "Task 999 was not found."
 

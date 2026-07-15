@@ -76,6 +76,41 @@ def is_cancellation(message: str) -> bool:
     return normalized in _CANCELLATION_PHRASES
 
 
+# Tools whose execution is irreversible enough to require the user to
+# explicitly say yes before it runs, instead of executing as soon as the
+# decision is complete.
+_DESTRUCTIVE_TOOLS = {"delete_task"}
+
+
+def requires_confirmation(selected_tool: str | None) -> bool:
+    """Whether a complete decision for this tool must be confirmed before it runs."""
+    return selected_tool in _DESTRUCTIVE_TOOLS
+
+
+def build_confirmation_question(decision: ToolDecision) -> str:
+    """Deterministic, tool-specific yes/no question for a destructive decision."""
+    if decision.selected_tool == "delete_task":
+        return f"Are you sure you want to delete task #{decision.arguments['task_id']}?"
+
+    return "Are you sure you want to proceed?"
+
+
+_CONFIRMATION_PHRASES = {"yes", "confirm", "proceed", "da"}
+_CONFIRMATION_CANCELLATION_PHRASES = {"no", "cancel", "never mind", "stop", "nu"}
+
+
+def is_confirmation_reply(message: str) -> bool:
+    """Whether a follow-up reply confirms a pending destructive action."""
+    normalized = message.strip().lower().strip(" .!?")
+    return normalized in _CONFIRMATION_PHRASES
+
+
+def is_confirmation_cancellation(message: str) -> bool:
+    """Whether a follow-up reply cancels a pending destructive action."""
+    normalized = message.strip().lower().strip(" .!?")
+    return normalized in _CONFIRMATION_CANCELLATION_PHRASES
+
+
 def _extract_integer_from_reply(message: str) -> int | None:
     """Pull the first run of digits out of a short follow-up reply, e.g.
     "3" or "task 3" -> 3. Same idea as agent_decision._extract_task_id,

@@ -117,7 +117,13 @@ def test_agent_execute_endpoints_work_with_sqlite(client):
     # the response - re-check via a plain REST GET.
     assert client.get(f"/tasks/{task_id}").json()["done"] is True
 
-    deleted = client.post("/agent/execute", json={"message": f"Delete task {task_id}"}).json()
-    assert deleted["selected_tool"] == "delete_task"
+    asked = client.post("/agent/execute", json={"message": f"Delete task {task_id}"}).json()
+    assert asked["selected_tool"] == "delete_task"
+    assert asked["needs_confirmation"] is True
+
+    deleted = client.post(
+        "/agent/execute",
+        json={"message": "yes", "conversation_id": asked["conversation_id"]},
+    ).json()
     assert deleted["result"] == {"status": "deleted", "task_id": task_id}
     assert client.get(f"/tasks/{task_id}").status_code == 404

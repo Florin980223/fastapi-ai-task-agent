@@ -1,7 +1,7 @@
-"""In-memory storage for pending multi-turn clarifications and remembered
-conversation context.
+"""In-memory storage for pending multi-turn clarifications, pending
+destructive-action confirmations, and remembered conversation context.
 
-Two independent stores, both keyed by conversation_id, both in-process
+Three independent stores, all keyed by conversation_id, all in-process
 only (reset on restart, same as tasks_db in app/models.py - no database
 or Redis involved):
 
@@ -9,11 +9,18 @@ or Redis involved):
   because a required argument is missing, the decision is parked here
   so the next request in the same conversation can supply just the
   missing piece (e.g. "3") instead of restating the whole request.
+- _pending_confirmation: when a decision is complete but selects a
+  destructive tool (e.g. delete_task), it is parked here instead of
+  being executed, so the next request in the same conversation must
+  explicitly confirm ("yes") or cancel ("no") it. Completely separate
+  from _pending - a conversation is only ever waiting on one of the
+  two at a time, but clearing/resolving one never touches the other.
 - _last_task_id: the most recent task id a successful create_task /
   update_task / mark_task_done identified, so a later referential
   message ("Mark it as done") can resolve "it" without asking again.
-  Completely separate from _pending - cancelling a pending
-  clarification does not touch this, and vice versa.
+  Completely separate from _pending and _pending_confirmation -
+  cancelling a pending clarification or confirmation does not touch
+  this, and vice versa.
 """
 
 from dataclasses import dataclass
@@ -43,6 +50,31 @@ def set(conversation_id: UUID, pending: PendingClarification) -> None:
 
 def clear(conversation_id: UUID) -> None:
     _pending.pop(conversation_id, None)
+
+
+@dataclass
+class PendingConfirmation:
+    """A fully-formed, destructive tool decision awaiting explicit confirmation."""
+
+    selected_tool: str
+    arguments: dict[str, str | int | bool | None]
+    reason: str
+    question: str
+
+
+_pending_confirmation: dict[UUID, PendingConfirmation] = {}
+
+
+def get_confirmation(conversation_id: UUID) -> PendingConfirmation | None:
+    return _pending_confirmation.get(conversation_id)
+
+
+def set_confirmation(conversation_id: UUID, pending: PendingConfirmation) -> None:
+    _pending_confirmation[conversation_id] = pending
+
+
+def clear_confirmation(conversation_id: UUID) -> None:
+    _pending_confirmation.pop(conversation_id, None)
 
 
 _last_task_id: dict[UUID, int] = {}

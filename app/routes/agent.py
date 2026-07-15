@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas import DecideToolRequest, DecideToolResponse, ExecuteRequest, ExecuteResponse, ToolResponse
 from app.services import agent_decision, agent_service, clarification, conversation_memory, tool_schemas
-from app.services.conversation_memory import PendingClarification
+from app.services.conversation_memory import PendingClarification, PendingConfirmation
 from app.services.tool_decision import ToolDecision
 from app.services.tool_registry import AVAILABLE_TOOLS
 
@@ -41,6 +41,66 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
     conversation_id = request.conversation_id or uuid.uuid4()
     message = request.message
 
+    pending_confirmation = conversation_memory.get_confirmation(conversation_id)
+
+    if pending_confirmation is not None:
+        if clarification.is_confirmation_cancellation(message):
+            conversation_memory.clear_confirmation(conversation_id)
+            return ExecuteResponse(
+                conversation_id=conversation_id,
+                message=message,
+                selected_tool=None,
+                result=None,
+                reason="The pending action was cancelled.",
+                final_answer="Okay, I cancelled the pending action.",
+                needs_clarification=False,
+                clarification_question=None,
+                needs_confirmation=False,
+                confirmation_question=None,
+            )
+
+        if not clarification.is_confirmation_reply(message):
+            # Neither a clear yes nor a clear no - keep waiting rather
+            # than guessing, and don't touch any state.
+            return ExecuteResponse(
+                conversation_id=conversation_id,
+                message=message,
+                selected_tool=pending_confirmation.selected_tool,
+                result=None,
+                reason=pending_confirmation.reason,
+                final_answer=pending_confirmation.question,
+                needs_clarification=False,
+                clarification_question=None,
+                needs_confirmation=True,
+                confirmation_question=pending_confirmation.question,
+            )
+
+        # Confirmed - revalidate the stored decision immediately before
+        # executing it, then run it exactly like any other complete
+        # decision below.
+        conversation_memory.clear_confirmation(conversation_id)
+        decision = ToolDecision(
+            selected_tool=pending_confirmation.selected_tool,
+            arguments=pending_confirmation.arguments,
+            reason=pending_confirmation.reason,
+        )
+        tool_schemas.validate_tool_call(decision.selected_tool, decision.arguments)
+        result = agent_service.execute_tool(decision, db)
+        conversation_memory.record_result(conversation_id, decision.selected_tool, result)
+        final_answer = agent_service.generate_final_answer(decision.selected_tool, result)
+        return ExecuteResponse(
+            conversation_id=conversation_id,
+            message=message,
+            selected_tool=decision.selected_tool,
+            result=result,
+            reason=decision.reason,
+            final_answer=final_answer,
+            needs_clarification=False,
+            clarification_question=None,
+            needs_confirmation=False,
+            confirmation_question=None,
+        )
+
     pending = conversation_memory.get(conversation_id)
 
     if pending is not None:
@@ -55,6 +115,8 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
                 final_answer="Okay, I cancelled the pending action.",
                 needs_clarification=False,
                 clarification_question=None,
+                needs_confirmation=False,
+                confirmation_question=None,
             )
 
         # A pending clarification exists - parse this reply deterministically
@@ -96,6 +158,8 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
             final_answer=question,
             needs_clarification=True,
             clarification_question=question,
+            needs_confirmation=False,
+            confirmation_question=None,
         )
 
     # Complete decision - validate it the same way a provider decision
@@ -104,7 +168,37 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
     if decision.selected_tool is not None:
         tool_schemas.validate_tool_call(decision.selected_tool, decision.arguments)
 
+    # The decision is fully resolved now (no missing arguments), whether
+    # it goes on to execute immediately or wait for confirmation below -
+    # either way, any pending clarification for this conversation is done.
     conversation_memory.clear(conversation_id)
+
+    # Destructive tools don't execute yet - park the decision and ask
+    # the user to explicitly confirm it first.
+    if clarification.requires_confirmation(decision.selected_tool):
+        question = clarification.build_confirmation_question(decision)
+        conversation_memory.set_confirmation(
+            conversation_id,
+            PendingConfirmation(
+                selected_tool=decision.selected_tool,
+                arguments=decision.arguments,
+                reason=decision.reason,
+                question=question,
+            ),
+        )
+        return ExecuteResponse(
+            conversation_id=conversation_id,
+            message=message,
+            selected_tool=decision.selected_tool,
+            result=None,
+            reason=decision.reason,
+            final_answer=question,
+            needs_clarification=False,
+            clarification_question=None,
+            needs_confirmation=True,
+            confirmation_question=question,
+        )
+
     result = agent_service.execute_tool(decision, db)
     conversation_memory.record_result(conversation_id, decision.selected_tool, result)
     final_answer = agent_service.generate_final_answer(decision.selected_tool, result)
@@ -117,4 +211,6 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
         final_answer=final_answer,
         needs_clarification=False,
         clarification_question=None,
+        needs_confirmation=False,
+        confirmation_question=None,
     )

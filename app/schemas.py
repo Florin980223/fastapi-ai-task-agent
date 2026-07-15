@@ -93,3 +93,5 @@ class ExecuteResponse(BaseModel):
     final_answer: str
     needs_clarification: bool = False
     clarification_question: str | None = None
+    needs_confirmation: bool = False
+    confirmation_question: str | None = None
