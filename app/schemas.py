@@ -7,7 +7,7 @@ tasks are stored internally.
 
 import uuid
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TaskCreate(BaseModel):
@@ -82,6 +82,17 @@ class ExecuteRequest(BaseModel):
     conversation_id: uuid.UUID | None = None
 
 
+class StepResultResponse(BaseModel):
+    """Shape of a single entry in ExecuteResponse.steps."""
+
+    step: int
+    tool: str
+    arguments: dict
+    status: str
+    result: dict | list | None = None
+    error: str | None = None
+
+
 class ExecuteResponse(BaseModel):
     """Shape of the response for POST /agent/execute."""
 
@@ -95,3 +106,5 @@ class ExecuteResponse(BaseModel):
     clarification_question: str | None = None
     needs_confirmation: bool = False
     confirmation_question: str | None = None
+    is_multi_step: bool = False
+    steps: list[StepResultResponse] = Field(default_factory=list)

@@ -12,8 +12,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.schemas import DecideToolRequest, DecideToolResponse, ExecuteRequest, ExecuteResponse, ToolResponse
-from app.services import agent_decision, agent_service, clarification, conversation_memory, tool_schemas
+from app.schemas import DecideToolRequest, DecideToolResponse, ExecuteRequest, ExecuteResponse, StepResultResponse, ToolResponse
+from app.services import agent_decision, agent_planner, agent_service, clarification, conversation_memory, tool_schemas
 from app.services.conversation_memory import PendingClarification, PendingConfirmation
 from app.services.tool_decision import ToolDecision
 from app.services.tool_registry import AVAILABLE_TOOLS
@@ -57,6 +57,8 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
                 clarification_question=None,
                 needs_confirmation=False,
                 confirmation_question=None,
+                is_multi_step=False,
+                steps=[],
             )
 
         if not clarification.is_confirmation_reply(message):
@@ -73,6 +75,8 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
                 clarification_question=None,
                 needs_confirmation=True,
                 confirmation_question=pending_confirmation.question,
+                is_multi_step=False,
+                steps=[],
             )
 
         # Confirmed - revalidate the stored decision immediately before
@@ -99,6 +103,8 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
             clarification_question=None,
             needs_confirmation=False,
             confirmation_question=None,
+            is_multi_step=False,
+            steps=[],
         )
 
     pending = conversation_memory.get(conversation_id)
@@ -117,6 +123,8 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
                 clarification_question=None,
                 needs_confirmation=False,
                 confirmation_question=None,
+                is_multi_step=False,
+                steps=[],
             )
 
         # A pending clarification exists - parse this reply deterministically
@@ -129,6 +137,43 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
             reason=pending.reason,
         )
     else:
+        if agent_planner.should_attempt_planning(message):
+            plan = agent_planner.decide_plan(message)
+            if plan is not None:
+                step_results = agent_planner.execute_plan(plan, db, conversation_id)
+                return ExecuteResponse(
+                    conversation_id=conversation_id,
+                    message=message,
+                    selected_tool=None,
+                    result=None,
+                    reason=agent_planner.build_plan_reason(step_results, len(plan.steps)),
+                    final_answer=agent_planner.build_plan_final_answer(step_results),
+                    needs_clarification=False,
+                    clarification_question=None,
+                    needs_confirmation=False,
+                    confirmation_question=None,
+                    is_multi_step=True,
+                    steps=[StepResultResponse(**r.model_dump()) for r in step_results],
+                )
+            # Planning was attempted (the message looked multi-step) but
+            # failed or produced an invalid/disallowed plan. Do NOT fall
+            # back to deciding a single tool from this (possibly
+            # multi-action) message - that could silently execute only a
+            # fragment of what was asked. Stop cleanly instead.
+            return ExecuteResponse(
+                conversation_id=conversation_id,
+                message=message,
+                selected_tool=None,
+                result=None,
+                reason="Multi-step planning did not produce a valid, safe plan.",
+                final_answer="I couldn't create a safe multi-step plan. Please rephrase the request.",
+                needs_clarification=False,
+                clarification_question=None,
+                needs_confirmation=False,
+                confirmation_question=None,
+                is_multi_step=True,
+                steps=[],
+            )
         decision = agent_decision.decide_tool(message)
 
     # Fill in a missing task_id from remembered context, but only if the
@@ -160,6 +205,8 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
             clarification_question=question,
             needs_confirmation=False,
             confirmation_question=None,
+            is_multi_step=False,
+            steps=[],
         )
 
     # Complete decision - validate it the same way a provider decision
@@ -197,6 +244,8 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
             clarification_question=None,
             needs_confirmation=True,
             confirmation_question=question,
+            is_multi_step=False,
+            steps=[],
         )
 
     result = agent_service.execute_tool(decision, db)
@@ -213,4 +262,6 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
         clarification_question=None,
         needs_confirmation=False,
         confirmation_question=None,
+        is_multi_step=False,
+        steps=[],
     )

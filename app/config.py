@@ -17,6 +17,12 @@ load_dotenv()  # no-op if there's no .env file; loads one if present
 # "ollama" (asks a local Ollama model - app/services/ollama_decision_provider.py).
 DECISION_PROVIDER = os.environ.get("AGENT_DECISION_PROVIDER", "rule_based").strip().lower()
 
+# Whether POST /agent/execute may return a multi-step plan (up to 3
+# sequential existing-tool calls) instead of a single tool call. Only
+# takes effect when DECISION_PROVIDER is "ollama" - rule_based and
+# anthropic remain single-step only in this first implementation.
+MULTI_STEP_PLANNING_ENABLED = os.environ.get("AGENT_MULTI_STEP_PLANNING", "false").strip().lower() == "true"
+
 # The Claude model to use when DECISION_PROVIDER is "anthropic".
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
 

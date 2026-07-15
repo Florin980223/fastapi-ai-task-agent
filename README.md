@@ -25,6 +25,15 @@ configuration at all. `AGENT_DECISION_PROVIDER` can instead be set to:
 
 Both fall back to the rule-based logic automatically if they ever fail.
 
+Set `AGENT_MULTI_STEP_PLANNING=true` (with `AGENT_DECISION_PROVIDER=ollama`)
+to let `POST /agent/execute` plan and run up to 3 existing tools for a
+single request, e.g. "Create a task to buy milk and then show me all
+tasks". It's off by default, only ever available through Ollama, and never
+includes `delete_task` - deleting a task always goes through its normal
+confirmation flow, one request at a time. Any request that can't be turned
+into a safe plan runs nothing and reports a clear error instead of falling
+back to guessing a single action.
+
 `DATABASE_URL` controls where task data is persisted. It defaults to a
 local SQLite file (`sqlite:///./tasks.db`) in the project root, created
 automatically the first time the app starts — no setup required.
