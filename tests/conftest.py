@@ -80,14 +80,17 @@ def reset_tasks_db():
 
 @pytest.fixture(autouse=True)
 def reset_conversation_memory():
-    """Reset pending-clarification and remembered-context memory before
-    and after every test.
+    """Reset pending-clarification, pending-confirmation, and
+    remembered-context memory before and after every test.
 
-    conversation_memory._pending and _last_task_id are module-level
-    globals, same reason as reset_tasks_db above.
+    conversation_memory._pending, _pending_confirmation, and
+    _last_task_id are module-level globals, same reason as
+    reset_tasks_db above.
     """
     conversation_memory._pending.clear()
+    conversation_memory._pending_confirmation.clear()
     conversation_memory._last_task_id.clear()
     yield
     conversation_memory._pending.clear()
+    conversation_memory._pending_confirmation.clear()
     conversation_memory._last_task_id.clear()
