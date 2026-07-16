@@ -79,6 +79,47 @@ API response. No API keys, headers, or environment secrets are ever
 recorded; large tool results are stored as a bounded summary rather than
 in full.
 
+## Evaluations
+
+A separate, offline evaluation suite - distinct from `pytest` - measures
+agent *quality* against a versioned dataset of real user messages and
+expected outcomes (`evals/data/cases_v1.jsonl`, ~35 cases across all 7
+categories, balanced between English and Romanian). It drives the real
+`/agent/execute` endpoint (never reimplementing its routing/decision
+logic), checks both response fields *and* actual database side effects,
+and runs in an isolated temp-file SQLite database that's deleted
+afterward - it never touches `tasks.db`.
+
+```bash
+python -m evals.run                        # rule_based mode (default)
+python -m evals.run --mode mocked-ollama
+python -m evals.run --mode live-ollama --allow-live-ollama
+```
+
+Three modes, each measuring something different - and the report always
+says which:
+
+| mode | what it evaluates | measures real model quality? |
+|---|---|---|
+| `rule_based` (default) | the real, unmodified rule-based decision logic - fully offline | no |
+| `mocked-ollama` | the evaluation pipeline and the Ollama request/response contract, with a scripted stub standing in for the model - fully offline | no |
+| `live-ollama` | actual quality of a real local Ollama model's decisions - requires `--allow-live-ollama` **and** `--mode live-ollama` together, plus a running local Ollama server | yes |
+
+`live-ollama` is never invoked by `pytest`, and `get_weather` is always
+mocked (in every mode, including `live-ollama`) so a score reflects the
+agent's own behavior, not Open-Meteo's uptime.
+
+Each run prints a terminal summary (overall + per-metric +
+per-category accuracy, failed-case detail) and writes a JSON report
+under `evals/reports/` (gitignored - a normal run never dirties `git
+status`) with full reproducibility metadata: dataset version, mode,
+model name, git commit, thresholds, and timestamp. Exit code `0` means
+the mode's accuracy thresholds were met, `1` means they weren't, `2` is
+a usage/setup error. Thresholds are mode-calibrated (`rule_based` has a
+structurally lower ceiling - no Romanian tool-selection keywords and no
+multi-step planning at all outside `ollama`) and overridable via
+`--min-overall-accuracy`/`--min-safety-accuracy`.
+
 ## Notes
 
 - Tasks are persisted in SQLite (see `DATABASE_URL` above) — data survives
