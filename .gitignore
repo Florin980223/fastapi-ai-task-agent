@@ -5,3 +5,5 @@ venv/
 .env
 tasks.db
 evals/reports/
+.env.docker
+docker-data/

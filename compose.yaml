@@ -1,0 +1,31 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fastapi-ai-task-agent:local
+    env_file:
+      - .env.docker
+    ports:
+      # Bound to localhost only - this is a local demo/dev setup and
+      # must not be reachable from the LAN by default. Change to
+      # "8000:8000" yourself if you deliberately want that.
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - agent_data:/data
+      # Optional bind-mount alternative (see README) - lets you inspect
+      # the SQLite file directly on the host. NEVER point this at the
+      # project's real ./tasks.db - use a new directory only:
+      # - ./docker-data:/data
+    extra_hosts:
+      # Lets OLLAMA_BASE_URL=http://host.docker.internal:11434 resolve
+      # to the host machine. Native on Docker Desktop (Windows/Mac);
+      # this entry also makes it work on native Linux Docker Engine
+      # 20.10+.
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    # Healthcheck is inherited from the Dockerfile's HEALTHCHECK
+    # instruction (single source of truth - not duplicated here).
+
+volumes:
+  agent_data:

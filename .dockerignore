@@ -1,0 +1,36 @@
+# Git
+.git/
+.gitignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+
+# Secrets / local env files - never baked into the image
+.env
+.env.docker
+.env.*.local
+
+# Local databases - the real dev DB must never enter the build context
+tasks.db
+auth_test.db
+*.db
+*.db-journal
+
+# Tests / evaluation code+reports - not needed at runtime
+tests/
+evals/
+
+# Docker recipe files - not needed inside the image itself
+Dockerfile
+compose.yaml
+docker/smoke_test.ps1
+docker-data/
+
+# Misc
+README.md
+.claude/
