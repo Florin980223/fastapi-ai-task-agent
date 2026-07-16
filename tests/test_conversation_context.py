@@ -20,6 +20,29 @@ def _execute(client, message, conversation_id=None):
     return response.json()
 
 
+def test_remembered_context_is_isolated_between_users(client, other_user_headers):
+    created = _execute(client, "Add a task to buy milk")
+    conversation_id = created["conversation_id"]
+
+    # Bob reuses alice's exact conversation_id. He has no remembered
+    # task under (bob, conversation_id), even though alice's context
+    # store has one under (alice, conversation_id) - "it" cannot resolve
+    # for him, and alice's task is never touched.
+    response = client.post(
+        "/agent/execute",
+        json={"message": "Mark it as done", "conversation_id": conversation_id},
+        headers=other_user_headers,
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["selected_tool"] == "mark_task_done"
+    assert data["needs_clarification"] is True
+    assert data["result"] is None
+
+    # Alice's task is unaffected.
+    assert client.get(f"/tasks/{created['result']['id']}").json()["done"] is False
+
+
 def test_mark_it_as_done_uses_remembered_context(client):
     created = _execute(client, "Add a task to buy milk")
     conversation_id = created["conversation_id"]

@@ -206,3 +206,32 @@ def test_llm_only_formulation_preserves_selected_tool_over_fallback(client, monk
     assert data["selected_tool"] == "delete_task"
     assert data["needs_clarification"] is True
     assert data["clarification_question"] == "Which task ID should I delete?"
+
+
+def test_clarification_state_is_isolated_between_users(client, other_user_headers):
+    asked = _execute(client, "Create a task")
+    conversation_id = asked["conversation_id"]
+    assert asked["needs_clarification"] is True
+
+    # Bob reuses alice's conversation_id but has no pending clarification
+    # under (bob, conversation_id) - his message is treated as a fresh
+    # request, never as an answer to alice's pending create_task.
+    bob_response = client.post(
+        "/agent/execute",
+        json={"message": "Buy milk", "conversation_id": conversation_id},
+        headers=other_user_headers,
+    )
+    assert bob_response.status_code == 200
+    bob_data = bob_response.json()
+    assert bob_data["selected_tool"] is None
+    assert bob_data["needs_clarification"] is False
+
+    # Alice's own later reply still resumes her pending clarification.
+    response = client.post(
+        "/agent/execute",
+        json={"message": "Buy milk", "conversation_id": conversation_id},
+    )
+    answered = response.json()
+    assert answered["needs_clarification"] is False
+    assert answered["selected_tool"] == "create_task"
+    assert answered["result"]["title"] == "Buy milk"

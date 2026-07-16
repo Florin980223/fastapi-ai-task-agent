@@ -193,6 +193,35 @@ def test_confirmation_state_clears_after_success(client):
     assert followup["needs_confirmation"] is False
 
 
+def test_pending_confirmation_is_isolated_between_users(client, other_user_headers):
+    created = _execute(client, "Add a task to buy milk")
+    task_id = created["result"]["id"]
+
+    asked = _execute(client, f"Delete task {task_id}")
+    conversation_id = asked["conversation_id"]
+    assert asked["needs_confirmation"] is True
+
+    # Bob reuses alice's conversation_id and says "yes". He has no
+    # pending confirmation under (bob, conversation_id), so nothing of
+    # alice's is deleted - his "yes" is just an ordinary, unmatched
+    # message.
+    bob_response = client.post(
+        "/agent/execute",
+        json={"message": "yes", "conversation_id": conversation_id},
+        headers=other_user_headers,
+    )
+    assert bob_response.status_code == 200
+    bob_data = bob_response.json()
+    assert bob_data["result"] is None
+    assert bob_data["needs_confirmation"] is False
+    assert any(task["id"] == task_id for task in client.get("/tasks").json())
+
+    # Alice's own later "yes" still executes her own pending delete.
+    confirmed = _execute(client, "yes", conversation_id=conversation_id)
+    assert confirmed["result"] == {"status": "deleted", "task_id": task_id}
+    assert client.get("/tasks").json() == []
+
+
 def test_non_destructive_tools_still_execute_immediately(client, monkeypatch):
     from app.services import weather_service
 

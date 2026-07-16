@@ -166,6 +166,7 @@ def record_execute_run(
     *,
     run_id: uuid.UUID,
     conversation_id: uuid.UUID,
+    user_id: str,
     message: str,
     decision_provider: str,
     started_at: datetime,
@@ -194,6 +195,7 @@ def record_execute_run(
         run = AgentRun(
             run_id=run_id,
             conversation_id=conversation_id,
+            user_id=user_id,
             message=message,
             decision_provider=decision_provider,
             is_multi_step=response.is_multi_step,
@@ -218,11 +220,15 @@ def record_execute_run(
         trace_db.close()
 
 
-def list_runs(db: Session, limit: int) -> list[AgentRun]:
-    stmt = select(AgentRun).order_by(AgentRun.started_at.desc()).limit(limit)
+def list_runs(db: Session, limit: int, user_id: str) -> list[AgentRun]:
+    stmt = select(AgentRun).where(AgentRun.user_id == user_id).order_by(AgentRun.started_at.desc()).limit(limit)
     return list(db.scalars(stmt).all())
 
 
-def find_run(db: Session, run_id: uuid.UUID) -> AgentRun | None:
-    stmt = select(AgentRun).options(selectinload(AgentRun.steps)).where(AgentRun.run_id == run_id)
+def find_run(db: Session, run_id: uuid.UUID, user_id: str) -> AgentRun | None:
+    stmt = (
+        select(AgentRun)
+        .options(selectinload(AgentRun.steps))
+        .where(AgentRun.run_id == run_id, AgentRun.user_id == user_id)
+    )
     return db.scalar(stmt)

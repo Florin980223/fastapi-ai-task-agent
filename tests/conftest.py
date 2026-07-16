@@ -7,6 +7,16 @@ import os
 # anything that imports app.config) is imported below.
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 
+# Deterministic test API keys - two distinct users, so cross-user
+# isolation tests never need real/secret configuration. Set before
+# app.main (and anything that imports app.config) is imported below,
+# since app.config.API_KEYS is parsed once, eagerly, at import time.
+TEST_API_KEY = "test-key-alice"
+TEST_USER_ID = "alice"
+OTHER_TEST_API_KEY = "test-key-bob"
+OTHER_TEST_USER_ID = "bob"
+os.environ["API_KEYS"] = f"{TEST_API_KEY}:{TEST_USER_ID},{OTHER_TEST_API_KEY}:{OTHER_TEST_USER_ID}"
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -52,8 +62,54 @@ database.SessionLocal = TestSessionLocal
 
 @pytest.fixture
 def client():
-    """A FastAPI TestClient for making requests against the app."""
+    """A FastAPI TestClient for making requests against the app,
+    authenticated as a deterministic test user (alice). This is what
+    keeps every pre-existing test passing unmodified: none of them send
+    their own X-API-Key header, so they're all implicitly authenticated
+    as alice now.
+    """
+    return TestClient(app, headers={"X-API-Key": TEST_API_KEY})
+
+
+@pytest.fixture
+def other_user_headers():
+    """Headers for a second, distinct authenticated user (bob) - for
+    cross-user isolation tests that need to act as someone other than
+    the default `client` fixture's user.
+    """
+    return {"X-API-Key": OTHER_TEST_API_KEY}
+
+
+@pytest.fixture
+def unauthenticated_client():
+    """A FastAPI TestClient that never sends X-API-Key, for testing the
+    missing-header 401 case.
+    """
     return TestClient(app)
+
+
+@pytest.fixture
+def test_user_id():
+    """The user_id the `client` fixture is authenticated as - for tests
+    that call app.services.task_service functions directly (which now
+    require a user_id) rather than only through the HTTP client.
+    """
+    return TEST_USER_ID
+
+
+@pytest.fixture
+def other_test_user_id():
+    return OTHER_TEST_USER_ID
+
+
+@pytest.fixture
+def test_api_key():
+    return TEST_API_KEY
+
+
+@pytest.fixture
+def other_test_api_key():
+    return OTHER_TEST_API_KEY
 
 
 @pytest.fixture

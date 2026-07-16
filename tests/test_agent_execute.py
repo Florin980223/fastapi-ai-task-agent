@@ -86,6 +86,29 @@ def test_deleting_missing_task_returns_friendly_final_answer(client):
     assert data["final_answer"] == "Task 999 was not found."
 
 
+def test_agent_created_task_is_owned_by_the_authenticated_user(client, other_user_headers):
+    created = _execute(client, "Add a task to buy milk")
+    task_id = created["result"]["id"]
+
+    # Bob (a different authenticated user) cannot see or reach it.
+    assert client.get(f"/tasks/{task_id}", headers=other_user_headers).status_code == 404
+    bob_tasks = client.get("/tasks", headers=other_user_headers).json()
+    assert bob_tasks == []
+
+    # Alice can.
+    assert client.get(f"/tasks/{task_id}").status_code == 200
+
+
+def test_agent_list_tasks_only_returns_the_authenticated_users_tasks(client, other_user_headers):
+    client.post("/tasks", json={"title": "Bob task"}, headers=other_user_headers)
+    _execute(client, "Add a task to buy milk")
+
+    data = _execute(client, "Show me all tasks")
+
+    assert data["selected_tool"] == "list_tasks"
+    assert [task["title"] for task in data["result"]] == ["buy milk"]
+
+
 def test_get_weather_final_answer_uses_mocked_weather_service(client, monkeypatch):
     # Avoid calling the real Open-Meteo API: replace weather_service's
     # function with a fake that returns a fixed result.

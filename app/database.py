@@ -33,7 +33,11 @@ def get_db():
 
 
 def init_db() -> None:
-    """Create all tables that don't exist yet. Safe to call on every startup."""
+    """Create all tables that don't exist yet, then patch any pre-existing
+    table that predates the user_id column. Safe to call on every startup.
+    """
     from app import db_models  # noqa: F401 - registers Task on Base.metadata
+    from app.services.db_migrate import backfill_legacy_user_id_columns
 
     Base.metadata.create_all(bind=engine)
+    backfill_legacy_user_id_columns(engine)

@@ -9,14 +9,21 @@ tests/conftest.py has to work around with StaticPool, since a file-based
 SQLite database is naturally shared correctly across independent
 connections/threads.
 
-Both app.dependency_overrides[get_db] AND app.database.SessionLocal are
-overridden - the former for the FastAPI-injected session routes use, the
-latter because agent_trace_service.record_execute_run deliberately opens
-its own database.SessionLocal() session (see that module's docstring).
-Overriding both, rather than relying on "set DATABASE_URL before
-app.database is imported", is what makes this correct even when invoked
-from inside an already-running pytest process (where app.database was
-already imported, and bound, once by tests/conftest.py).
+app.dependency_overrides[get_db], app.database.SessionLocal, AND
+app.database.engine are all overridden - the first for the
+FastAPI-injected session routes use, the second because
+agent_trace_service.record_execute_run deliberately opens its own
+database.SessionLocal() session (see that module's docstring), and the
+third because app.database.init_db() - run on every app startup via the
+FastAPI lifespan, which TestClient(app, ...) triggers as a context
+manager - creates tables (and now also runs the legacy user_id
+backfill, see app/services/db_migrate.py) directly against the module-
+level engine, not through SessionLocal at all. Overriding all three,
+rather than relying on "set DATABASE_URL before app.database is
+imported", is what makes this correct even when invoked from inside an
+already-running pytest process (where app.database was already
+imported, and bound, once by tests/conftest.py) - and, critically, is
+what keeps every eval run fully off the real on-disk tasks.db.
 """
 
 import shutil
@@ -32,9 +39,11 @@ from sqlalchemy.orm import sessionmaker
 
 import app.database as database
 import app.services.conversation_memory as conversation_memory
+from app import config
 from app.database import Base, get_db
 from app.main import app
 from app.services import weather_service
+from evals import EVAL_API_KEY, EVAL_USER_ID
 
 # A fixed, deterministic weather reading - Open-Meteo's uptime must never
 # affect an agent-quality score, in any mode, including live-ollama.
@@ -109,13 +118,24 @@ def isolated_app_client():
 
         previous_override = app.dependency_overrides.get(get_db)
         previous_session_local = database.SessionLocal
+        previous_engine = database.engine
+        # Mutate (not reassign) the live dict so app.services.auth - which
+        # reads config.API_KEYS live on every request - sees this
+        # immediately, regardless of what was parsed at import time.
+        previous_api_keys = dict(config.API_KEYS)
+        config.API_KEYS[EVAL_API_KEY] = EVAL_USER_ID
 
         Base.metadata.create_all(bind=engine)
         app.dependency_overrides[get_db] = _override_get_db
         database.SessionLocal = eval_session_local
+        # init_db() (run by the FastAPI lifespan below) uses this module-
+        # level engine directly - without overriding it too, table
+        # creation and the legacy user_id backfill would run against the
+        # real on-disk tasks.db's engine instead of this temp one.
+        database.engine = engine
 
         try:
-            with mock_weather_service(), TestClient(app) as client:
+            with mock_weather_service(), TestClient(app, headers={"X-API-Key": EVAL_API_KEY}) as client:
                 yield IsolatedEnvironment(client=client, engine=engine)
         finally:
             if previous_override is not None:
@@ -123,6 +143,9 @@ def isolated_app_client():
             else:
                 app.dependency_overrides.pop(get_db, None)
             database.SessionLocal = previous_session_local
+            database.engine = previous_engine
+            config.API_KEYS.clear()
+            config.API_KEYS.update(previous_api_keys)
             engine.dispose()
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

@@ -25,6 +25,7 @@ from app.schemas import (
     ToolResponse,
 )
 from app.services import agent_decision, agent_planner, agent_service, agent_trace_service, clarification, conversation_memory, tool_schemas
+from app.services.auth import AuthenticatedUser, get_current_user
 from app.services.conversation_memory import PendingClarification, PendingConfirmation
 from app.services.tool_decision import ToolDecision
 from app.services.tool_registry import AVAILABLE_TOOLS
@@ -48,20 +49,24 @@ def decide_tool(request: DecideToolRequest):
 
 
 @router.get("/runs", response_model=list[AgentRunSummaryResponse])
-def list_runs(limit: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)):
-    return agent_trace_service.list_runs(db, limit=limit)
+def list_runs(
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    return agent_trace_service.list_runs(db, limit=limit, user_id=current_user.user_id)
 
 
 @router.get("/runs/{run_id}", response_model=AgentRunDetailResponse)
-def get_run(run_id: uuid.UUID, db: Session = Depends(get_db)):
-    run = agent_trace_service.find_run(db, run_id)
+def get_run(run_id: uuid.UUID, db: Session = Depends(get_db), current_user: AuthenticatedUser = Depends(get_current_user)):
+    run = agent_trace_service.find_run(db, run_id, user_id=current_user.user_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
     return run
 
 
 @router.post("/execute", response_model=ExecuteResponse)
-def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
+def execute(request: ExecuteRequest, db: Session = Depends(get_db), current_user: AuthenticatedUser = Depends(get_current_user)):
     # Every HTTP request gets its own run_id and its own persistent trace
     # - even a follow-up reply ("yes", a clarification answer) on the same
     # conversation_id. See agent_trace_service.record_execute_run, called
@@ -74,14 +79,15 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
     response: ExecuteResponse | None = None
 
     conversation_id = request.conversation_id or uuid.uuid4()
+    user_id = current_user.user_id
     message = request.message
 
     try:
-        pending_confirmation = conversation_memory.get_confirmation(conversation_id)
+        pending_confirmation = conversation_memory.get_confirmation(user_id, conversation_id)
 
         if pending_confirmation is not None:
             if clarification.is_confirmation_cancellation(message):
-                conversation_memory.clear_confirmation(conversation_id)
+                conversation_memory.clear_confirmation(user_id, conversation_id)
                 response = ExecuteResponse(
                     run_id=run_id,
                     conversation_id=conversation_id,
@@ -122,7 +128,7 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
             # Confirmed - revalidate the stored decision immediately before
             # executing it, then run it exactly like any other complete
             # decision below.
-            conversation_memory.clear_confirmation(conversation_id)
+            conversation_memory.clear_confirmation(user_id, conversation_id)
             decision = ToolDecision(
                 selected_tool=pending_confirmation.selected_tool,
                 arguments=pending_confirmation.arguments,
@@ -130,10 +136,10 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
             )
             tool_schemas.validate_tool_call(decision.selected_tool, decision.arguments)
             step_started = time.monotonic()
-            result = agent_service.execute_tool(decision, db)
+            result = agent_service.execute_tool(decision, db, user_id)
             single_step_duration_ms = int((time.monotonic() - step_started) * 1000)
             single_step_arguments = decision.arguments
-            conversation_memory.record_result(conversation_id, decision.selected_tool, result)
+            conversation_memory.record_result(user_id, conversation_id, decision.selected_tool, result)
             final_answer = agent_service.generate_final_answer(decision.selected_tool, result)
             response = ExecuteResponse(
                 run_id=run_id,
@@ -152,11 +158,11 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
             )
             return response
 
-        pending = conversation_memory.get(conversation_id)
+        pending = conversation_memory.get(user_id, conversation_id)
 
         if pending is not None:
             if clarification.is_cancellation(message):
-                conversation_memory.clear(conversation_id)
+                conversation_memory.clear(user_id, conversation_id)
                 response = ExecuteResponse(
                     run_id=run_id,
                     conversation_id=conversation_id,
@@ -187,7 +193,7 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
             if agent_planner.should_attempt_planning(message):
                 plan = agent_planner.decide_plan(message)
                 if plan is not None:
-                    step_results = agent_planner.execute_plan(plan, db, conversation_id)
+                    step_results = agent_planner.execute_plan(plan, db, conversation_id, user_id)
                     response = ExecuteResponse(
                         run_id=run_id,
                         conversation_id=conversation_id,
@@ -230,13 +236,14 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
         # Fill in a missing task_id from remembered context, but only if the
         # message explicitly refers back to a prior task ("it", "that task").
         # A generic incomplete request still asks for clarification below.
-        last_task_id = conversation_memory.get_last_task_id(conversation_id)
+        last_task_id = conversation_memory.get_last_task_id(user_id, conversation_id)
         clarification.resolve_remembered_task_id(decision, last_task_id, message)
 
         missing = clarification.missing_arguments(decision)
         if missing:
             question = clarification.build_clarification_question(decision.selected_tool, missing)
             conversation_memory.set(
+                user_id,
                 conversation_id,
                 PendingClarification(
                     selected_tool=decision.selected_tool,
@@ -271,13 +278,14 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
         # The decision is fully resolved now (no missing arguments), whether
         # it goes on to execute immediately or wait for confirmation below -
         # either way, any pending clarification for this conversation is done.
-        conversation_memory.clear(conversation_id)
+        conversation_memory.clear(user_id, conversation_id)
 
         # Destructive tools don't execute yet - park the decision and ask
         # the user to explicitly confirm it first.
         if clarification.requires_confirmation(decision.selected_tool):
             question = clarification.build_confirmation_question(decision)
             conversation_memory.set_confirmation(
+                user_id,
                 conversation_id,
                 PendingConfirmation(
                     selected_tool=decision.selected_tool,
@@ -304,10 +312,10 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
             return response
 
         step_started = time.monotonic()
-        result = agent_service.execute_tool(decision, db)
+        result = agent_service.execute_tool(decision, db, user_id)
         single_step_duration_ms = int((time.monotonic() - step_started) * 1000)
         single_step_arguments = decision.arguments
-        conversation_memory.record_result(conversation_id, decision.selected_tool, result)
+        conversation_memory.record_result(user_id, conversation_id, decision.selected_tool, result)
         final_answer = agent_service.generate_final_answer(decision.selected_tool, result)
         response = ExecuteResponse(
             run_id=run_id,
@@ -329,6 +337,7 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db)):
         agent_trace_service.record_execute_run(
             run_id=run_id,
             conversation_id=conversation_id,
+            user_id=user_id,
             message=message,
             decision_provider=agent_decision.DECISION_PROVIDER,
             started_at=started_at,

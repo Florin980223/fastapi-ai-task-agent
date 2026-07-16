@@ -18,6 +18,7 @@ class Task(Base):
     __tablename__ = "tasks"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     title: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str | None] = mapped_column(String, nullable=True)
     done: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -34,6 +35,7 @@ class AgentRun(Base):
     __tablename__ = "agent_runs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     run_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, unique=True, index=True)
     conversation_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
     message: Mapped[str] = mapped_column(String, nullable=False)

@@ -198,6 +198,27 @@ def test_create_task_then_list_tasks_executes_both_steps(client, monkeypatch):
     assert len(data["steps"][1]["result"]) == 1
 
 
+def test_multi_step_plan_created_task_is_owned_by_the_authenticated_user(client, monkeypatch, other_user_headers):
+    _enable_planning(monkeypatch)
+    response = _fake_plan_chat_response(
+        [
+            {"tool": "create_task", "arguments": {"title": "buy milk"}},
+            {"tool": "list_tasks", "arguments": {}},
+        ]
+    )
+    monkeypatch.setattr(ollama_planner_provider, "_call_ollama_plan", lambda payload: response)
+
+    data = _execute(client, "Create a task to buy milk and then show me all tasks")
+    task_id = data["steps"][0]["result"]["id"]
+
+    # The plan's own list_tasks step only ever saw alice's task.
+    assert [task["id"] for task in data["steps"][1]["result"]] == [task_id]
+
+    # Bob can neither see it in his own task list nor reach it directly.
+    assert client.get("/tasks", headers=other_user_headers).json() == []
+    assert client.get(f"/tasks/{task_id}", headers=other_user_headers).status_code == 404
+
+
 def test_mark_task_done_then_list_tasks(client, monkeypatch):
     created = client.post("/tasks", json={"title": "Buy milk"}).json()
     task_id = created["id"]

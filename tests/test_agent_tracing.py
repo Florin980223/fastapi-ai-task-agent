@@ -208,6 +208,44 @@ def test_run_ids_are_unique(client):
     uuid.UUID(second["run_id"])
 
 
+def test_trace_records_the_authenticated_user_as_owner(client, new_db_session, test_user_id):
+    import app.db_models as db_models
+
+    data = _execute(client, "Add a task to buy milk")
+
+    run = new_db_session.query(db_models.AgentRun).filter_by(run_id=uuid.UUID(data["run_id"])).one()
+    assert run.user_id == test_user_id
+
+
+def test_cross_user_run_list_is_isolated(client, other_user_headers):
+    _execute(client, "Add a task to buy milk")
+    other_response = client.post(
+        "/agent/execute", json={"message": "Add a task to walk the dog"}, headers=other_user_headers
+    )
+    assert other_response.status_code == 200
+
+    alice_runs = client.get("/agent/runs").json()
+    assert len(alice_runs) == 1
+    assert alice_runs[0]["message"] == "Add a task to buy milk"
+
+    bob_runs = client.get("/agent/runs", headers=other_user_headers).json()
+    assert len(bob_runs) == 1
+    assert bob_runs[0]["message"] == "Add a task to walk the dog"
+
+
+def test_cross_user_run_detail_returns_404(client, other_user_headers):
+    data = _execute(client, "Add a task to buy milk")
+
+    own = client.get(f"/agent/runs/{data['run_id']}")
+    cross_user = client.get(f"/agent/runs/{data['run_id']}", headers=other_user_headers)
+    nonexistent = client.get(f"/agent/runs/{uuid.uuid4()}", headers=other_user_headers)
+
+    assert own.status_code == 200
+    assert cross_user.status_code == 404
+    assert nonexistent.status_code == 404
+    assert cross_user.json() == nonexistent.json()
+
+
 def test_tracing_failure_does_not_undo_successful_task_operation(client, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("simulated tracing failure")

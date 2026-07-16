@@ -230,7 +230,7 @@ def _resolve_step_arguments(step: PlannedStep, results: list[StepResult]) -> dic
     return arguments
 
 
-def execute_plan(plan: AgentPlan, db: Session, conversation_id: UUID) -> list[StepResult]:
+def execute_plan(plan: AgentPlan, db: Session, conversation_id: UUID, user_id: str) -> list[StepResult]:
     """Run a validated plan's steps, strictly in order, stopping at the
     first step that isn't safe or successful to run.
 
@@ -301,8 +301,8 @@ def execute_plan(plan: AgentPlan, db: Session, conversation_id: UUID) -> list[St
             )
             break
 
-        result = agent_service.execute_tool(decision, db)
-        conversation_memory.record_result(conversation_id, step.tool, result)
+        result = agent_service.execute_tool(decision, db, user_id)
+        conversation_memory.record_result(user_id, conversation_id, step.tool, result)
         duration_ms = int((time.monotonic() - step_started) * 1000)
 
         if isinstance(result, dict) and "error" in result:

@@ -11,7 +11,7 @@ in a Python object.
 from app.services import task_service
 
 
-def test_create_task_writes_to_sqlite(client, new_db_session):
+def test_create_task_writes_to_sqlite(client, new_db_session, test_user_id):
     response = client.post("/tasks", json={"title": "Buy milk", "description": "2 liters"})
 
     assert response.status_code == 201
@@ -23,7 +23,7 @@ def test_create_task_writes_to_sqlite(client, new_db_session):
     # Re-fetch through a brand-new session, independent of whatever
     # session the request above used, to prove the row is really in
     # the database and not just an in-memory Python object.
-    found = task_service.find_task(new_db_session, body["id"])
+    found = task_service.find_task(new_db_session, test_user_id, body["id"])
     assert found is not None
     assert found.title == "Buy milk"
     assert found.description == "2 liters"
@@ -66,7 +66,7 @@ def test_mark_task_done_persists_done_true(client):
     assert refetched["done"] is True
 
 
-def test_delete_task_removes_the_database_record(client, new_db_session):
+def test_delete_task_removes_the_database_record(client, new_db_session, test_user_id):
     created = client.post("/tasks", json={"title": "Buy milk"}).json()
     task_id = created["id"]
 
@@ -75,7 +75,7 @@ def test_delete_task_removes_the_database_record(client, new_db_session):
 
     assert client.get(f"/tasks/{task_id}").status_code == 404
 
-    assert task_service.find_task(new_db_session, task_id) is None
+    assert task_service.find_task(new_db_session, test_user_id, task_id) is None
 
 
 def test_done_filtering_reflects_persisted_state(client):
@@ -93,10 +93,10 @@ def test_done_filtering_reflects_persisted_state(client):
     assert [task["id"] for task in pending_tasks] == [pending["id"]]
 
 
-def test_task_remains_available_through_a_new_repository_session(client, new_db_session):
+def test_task_remains_available_through_a_new_repository_session(client, new_db_session, test_user_id):
     created = client.post("/tasks", json={"title": "Buy milk"}).json()
 
-    tasks = task_service.list_tasks(new_db_session)
+    tasks = task_service.list_tasks(new_db_session, test_user_id)
     assert [task.id for task in tasks] == [created["id"]]
 
 
