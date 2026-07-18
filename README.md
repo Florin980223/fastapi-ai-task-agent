@@ -1,5 +1,7 @@
 # FastAPI AI Task Agent
 
+[![CI](https://github.com/Florin980223/fastapi-ai-task-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Florin980223/fastapi-ai-task-agent/actions/workflows/ci.yml)
+
 A small FastAPI backend for managing tasks, built as a learning project.
 Tasks are persisted in SQLite via SQLAlchemy. It also has a small
 rule-based agent (`/agent/...`) that can optionally use Claude to
@@ -273,6 +275,40 @@ recreates the container).
 - This stage intentionally has no HTTPS/TLS termination, reverse
   proxy, rate limiting, or production secrets manager — it's a local
   demo/dev setup, not a deployment-ready configuration.
+
+## Continuous Integration (CI)
+
+GitHub Actions (`.github/workflows/ci.yml`) runs two independent jobs on
+every push to `main`, every pull request targeting `main`, and on demand
+via `workflow_dispatch`:
+
+- **Test** — installs `requirements.txt`, runs the full `pytest` suite,
+  then runs the offline evaluation suite in `rule_based` mode
+  (`python -m evals.run --mode rule_based`). Uses fake, non-secret
+  configuration only (`API_KEYS=ci-test-key-do-not-use:ci-user`,
+  `AGENT_DECISION_PROVIDER=rule_based`, an isolated SQLite database under
+  the runner's temp directory) — your local `tasks.db` is never touched.
+- **Docker build** — builds the repo's `Dockerfile` and tags the image
+  locally (`fastapi-ai-task-agent:ci`) to catch build breakage. It never
+  pushes the image anywhere and needs no runtime API keys to build.
+
+CI may download GitHub Actions, Python packages, and Docker base-image
+layers from their respective registries, but the application tests and
+evals themselves make no live calls to Ollama, Anthropic, or Open-Meteo —
+`rule_based` mode and the test suite are fully offline and deterministic.
+
+Run the same checks locally:
+
+```bash
+python -m pip install -r requirements.txt
+python -m pip check
+python -m pytest -q
+python -m evals.run --mode rule_based
+docker build -t fastapi-ai-task-agent:ci .
+```
+
+Results appear on GitHub under the **Actions** tab, as check marks on
+each commit, and in the "Checks" section of a pull request.
 
 ## Notes
 

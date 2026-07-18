@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (pytest + rule_based evals)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      API_KEYS: ci-test-key-do-not-use:ci-user
+      AGENT_DECISION_PROVIDER: rule_based
+      AGENT_MULTI_STEP_PLANNING: "false"
+      DATABASE_URL: sqlite:///${{ runner.temp }}/ci-tasks.db
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.10"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip check
+
+      - name: Run pytest
+        run: python -m pytest -q
+
+      - name: Run rule_based evaluation suite
+        run: python -m evals.run --mode rule_based
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Build Docker image
+        run: docker build -t fastapi-ai-task-agent:ci .
