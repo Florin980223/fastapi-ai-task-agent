@@ -23,7 +23,7 @@ jobs:
       API_KEYS: ci-test-key-do-not-use:ci-user
       AGENT_DECISION_PROVIDER: rule_based
       AGENT_MULTI_STEP_PLANNING: "false"
-      DATABASE_URL: sqlite:///${{ runner.temp }}/ci-tasks.db
+  
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -43,10 +43,14 @@ jobs:
           python -m pip check
 
       - name: Run pytest
-        run: python -m pytest -q
+  env:
+    DATABASE_URL: sqlite:///${{ runner.temp }}/ci-tests.db
+  run: python -m pytest -q
 
       - name: Run rule_based evaluation suite
-        run: python -m evals.run --mode rule_based
+  env:
+    DATABASE_URL: sqlite:///${{ runner.temp }}/ci-evals.db
+  run: python -m evals.run --mode rule_based
 
   docker:
     name: Docker build
