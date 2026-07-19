@@ -47,7 +47,7 @@ jobs:
     DATABASE_URL: sqlite:///${{ runner.temp }}/ci-tests.db
   run: python -m pytest -q
 
-      - name: Run rule_based evaluation suite
+
   env:
     DATABASE_URL: sqlite:///${{ runner.temp }}/ci-evals.db
   run: python -m evals.run --mode rule_based
