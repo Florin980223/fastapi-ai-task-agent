@@ -2,16 +2,18 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   pull_request:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
 
 jobs:
@@ -19,11 +21,12 @@ jobs:
     name: Test (pytest + rule_based evals)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
     env:
-      API_KEYS: ci-test-key-do-not-use:ci-user
-      AGENT_DECISION_PROVIDER: rule_based
+      API_KEYS: "ci-test-key-do-not-use:ci-user"
+      AGENT_DECISION_PROVIDER: "rule_based"
       AGENT_MULTI_STEP_PLANNING: "false"
-  
+
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -43,19 +46,20 @@ jobs:
           python -m pip check
 
       - name: Run pytest
-  env:
-    DATABASE_URL: sqlite:///${{ runner.temp }}/ci-tests.db
-  run: python -m pytest -q
+        env:
+          DATABASE_URL: "sqlite:///${{ runner.temp }}/ci-tests.db"
+        run: python -m pytest -q
 
-
-  env:
-    DATABASE_URL: sqlite:///${{ runner.temp }}/ci-evals.db
-  run: python -m evals.run --mode rule_based
+      - name: Run rule_based evaluation suite
+        env:
+          DATABASE_URL: "sqlite:///${{ runner.temp }}/ci-evals.db"
+        run: python -m evals.run --mode rule_based
 
   docker:
     name: Docker build
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
     steps:
       - name: Checkout
         uses: actions/checkout@v6
