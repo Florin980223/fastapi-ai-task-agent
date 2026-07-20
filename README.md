@@ -408,6 +408,80 @@ your LAN. Open `http://localhost:8000/docs` for the interactive API
 docs (no key required just to view them; individual "Try it out" calls
 still need one).
 
+### PostgreSQL (optional)
+
+SQLite (the default above) needs no setup and is fine for local use.
+`compose.yaml` also ships a profile-gated `postgres` service — a fully
+local, free, production-style alternative — for anyone who'd rather run
+against a real network database. It never starts on a bare
+`docker compose up`; you opt in explicitly with `--profile postgres`.
+
+```powershell
+# 1. Edit .env.docker: uncomment the POSTGRES_USER/PASSWORD/DB lines and
+#    the postgresql+psycopg:// DATABASE_URL line, and comment out the
+#    sqlite:// DATABASE_URL line - see .env.docker.example.
+
+# 2. Start Postgres and wait for it to report healthy.
+docker compose --profile postgres up -d --wait postgres
+
+# 3. Migrate the (empty, first time) Postgres database - same
+#    "verify, don't mutate on startup" rule as SQLite above applies here
+#    too, so this is required before the app will start against it.
+docker compose --profile postgres run --rm app python -m alembic upgrade head
+
+# 4. Now start the app itself, against the same profile.
+docker compose --profile postgres up -d
+```
+
+There's deliberately no `depends_on: postgres` on the `app` service — Compose
+implicitly activates a profile-gated service's profile whenever an
+always-on service depends on it, which would silently start `postgres` on
+every bare `docker compose up` and defeat the point of gating it behind a
+profile. That's why the steps above are explicit and ordered instead.
+
+Inspect the data directly with `psql` inside the container:
+
+```powershell
+docker compose --profile postgres exec postgres psql -U taskagent -d taskagent
+```
+
+Postgres is also published to the host at `127.0.0.1:55432` (never
+`5432`, to avoid colliding with a Postgres already running natively on
+the host) — only for a host-side `psql`/GUI client or opt-in local
+integration tests; the `app` container itself always talks to it over the
+Compose-internal network via the service name `postgres`, not through
+this port.
+
+Stop it the same way as `app`:
+
+```powershell
+docker compose --profile postgres down    # stops and removes the container, keeps postgres_data
+```
+
+To remove the Postgres data too, remove *only* its own named volume —
+**never** `docker compose down -v` or `docker compose --profile postgres
+down -v`, both of which delete every named volume in `compose.yaml`
+(including `agent_data`), regardless of profiles:
+
+```powershell
+docker volume rm fastapi-ai-task-agent-postgres-data
+```
+
+To switch back to SQLite, restore `.env.docker`'s `DATABASE_URL` to
+`sqlite:////data/tasks.db` and comment the Postgres block back out, then
+restart with a bare `docker compose up -d` (no `--profile`).
+
+An opt-in integration test (`tests/test_postgres_integration.py`, skipped
+unless `POSTGRES_TEST_DATABASE_URL` is set) exercises the same Alembic
+migration and basic CRUD against a dedicated local `taskagent_test`
+database — never the real `taskagent` database or `tasks.db`:
+
+```powershell
+docker compose --profile postgres exec postgres psql -U taskagent -d taskagent -c "CREATE DATABASE taskagent_test OWNER taskagent;"
+$env:POSTGRES_TEST_DATABASE_URL = "postgresql+psycopg://taskagent:<password>@localhost:55432/taskagent_test"
+python -m pytest tests/test_postgres_integration.py -v
+```
+
 ### Checking health
 
 ```powershell

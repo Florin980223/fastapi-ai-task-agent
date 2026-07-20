@@ -26,6 +26,74 @@ services:
     restart: unless-stopped
     # Healthcheck is inherited from the Dockerfile's HEALTHCHECK
     # instruction (single source of truth - not duplicated here).
+    #
+    # Deliberately no `depends_on: postgres` here, even in PostgreSQL
+    # mode: Compose implicitly activates a profile-gated service's
+    # profile whenever an always-on service depends_on it, which would
+    # silently start `postgres` on every bare `docker compose up` and
+    # defeat the whole point of gating it behind a profile. See
+    # README.md's "PostgreSQL (optional)" section for the explicit,
+    # ordered startup sequence this requires instead.
+
+  # Optional PostgreSQL backend - never starts on a bare `docker compose
+  # up`. Start explicitly with `docker compose --profile postgres ...`
+  # (see README.md's "PostgreSQL (optional)" section for the full
+  # startup/shutdown procedure). SQLite (the `app` service's default
+  # DATABASE_URL, set in .env.docker) remains the zero-config default;
+  # this service exists purely as an optional, fully local, free
+  # production-style alternative.
+  postgres:
+    image: postgres:16.14
+    profiles:
+      - postgres
+    # env_file (not a Compose-level `${VAR}` environment: block) - same
+    # mechanism the `app` service above already uses. Compose's own
+    # `${VAR}` interpolation reads from the host shell or a top-level
+    # `.env` file, NOT from a service's env_file entry, so it can't see
+    # .env.docker's values at all; env_file injects POSTGRES_USER/
+    # POSTGRES_PASSWORD/POSTGRES_DB directly into this container's
+    # environment, exactly where the official postgres image's own
+    # entrypoint script already looks for them. That entrypoint script
+    # itself refuses to start without POSTGRES_PASSWORD set (or an
+    # explicit alternative auth method) - the same fail-closed guarantee
+    # a Compose-level ${VAR:?...} guard would give, provided for free by
+    # the upstream image.
+    env_file:
+      - .env.docker
+    ports:
+      # Bound to localhost only, like the app's own port above. Only
+      # needed so a host-side `psql`/GUI client or the opt-in
+      # POSTGRES_TEST_DATABASE_URL integration tests (run from the host,
+      # not a container) can reach it - the `app` container itself talks
+      # to PostgreSQL over the Compose-internal network via the service
+      # name `postgres`, never through this published port. A
+      # non-default host port (55432) so this never collides with a
+      # PostgreSQL already running natively on the host's 5432.
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # No bind-mount alternative offered here (unlike the SQLite volume
+      # above): PostgreSQL's data directory has strict ownership/
+      # permission requirements that commonly break under host
+      # bind-mounts, especially on Windows. Use `docker compose exec
+      # postgres psql ...` or `pg_dump` to inspect/back up data instead
+      # - see README.md.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
 
 volumes:
   agent_data:
+  # Explicit, stable name (not Compose's auto-derived, clone-location-
+  # dependent default) so it can be removed on its own via
+  # `docker volume rm fastapi-ai-task-agent-postgres-data` - see
+  # README.md. NEVER use `docker compose down -v` to remove "just" this
+  # volume: `-v` removes every named volume in this file, including
+  # `agent_data` above, regardless of Compose profiles (profiles gate
+  # which *services* start, not which volumes `down -v` deletes).
+  postgres_data:
+    name: fastapi-ai-task-agent-postgres-data
