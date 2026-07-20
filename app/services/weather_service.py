@@ -12,11 +12,22 @@ map to two different HTTP status codes: "city not found" (404) and
 
 import httpx
 
+from app.config import OPEN_METEO_TIMEOUT_SECONDS
+
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
-# Keep external calls from hanging forever.
-REQUEST_TIMEOUT_SECONDS = 5.0
+# Exactly one bounded retry, and only for a transport-level failure
+# (connection refused, DNS failure, a timeout - httpx.TransportError,
+# which covers httpx.TimeoutException too) - never for an HTTP status
+# error (httpx.HTTPStatusError, raised by raise_for_status() below):
+# Open-Meteo answered with a 4xx/5xx, and won't answer differently on
+# retry. Both calls below are idempotent GETs with no side effects, so
+# a single retry here is safe; unbounded/exponential-backoff retries
+# aren't - one immediate retry, no backoff, is enough to ride out a
+# single transient blip without meaningfully slowing down a real
+# failure.
+_MAX_RETRIES = 1
 
 
 class CityNotFoundError(Exception):
@@ -27,6 +38,19 @@ class WeatherServiceError(Exception):
     """Raised when a call to Open-Meteo fails (network error, bad status, etc.)."""
 
 
+def _get_with_retry(url: str, params: dict) -> httpx.Response:
+    attempt = 0
+    while True:
+        try:
+            response = httpx.get(url, params=params, timeout=OPEN_METEO_TIMEOUT_SECONDS)
+            response.raise_for_status()
+            return response
+        except httpx.TransportError:
+            if attempt >= _MAX_RETRIES:
+                raise
+            attempt += 1
+
+
 def geocode_city(city: str) -> dict:
     """Look up a city name and return its location info.
 
@@ -34,14 +58,10 @@ def geocode_city(city: str) -> dict:
     optionally "country" (Open-Meteo omits it for some places).
     """
     try:
-        response = httpx.get(
-            GEOCODING_URL,
-            params={"name": city, "count": 1},
-            timeout=REQUEST_TIMEOUT_SECONDS,
-        )
-        response.raise_for_status()
+        response = _get_with_retry(GEOCODING_URL, {"name": city, "count": 1})
     except httpx.HTTPError:
-        # Covers connection errors, timeouts, and non-2xx status codes.
+        # Covers connection errors/timeouts (after the bounded retry
+        # above) and non-2xx status codes (never retried).
         raise WeatherServiceError("Failed to reach the geocoding API") from None
 
     data = response.json()
@@ -55,16 +75,14 @@ def geocode_city(city: str) -> dict:
 def get_current_weather(latitude: float, longitude: float) -> dict:
     """Fetch the current weather for a given location."""
     try:
-        response = httpx.get(
+        response = _get_with_retry(
             FORECAST_URL,
-            params={
+            {
                 "latitude": latitude,
                 "longitude": longitude,
                 "current_weather": "true",
             },
-            timeout=REQUEST_TIMEOUT_SECONDS,
         )
-        response.raise_for_status()
     except httpx.HTTPError:
         raise WeatherServiceError("Failed to reach the forecast API") from None
 

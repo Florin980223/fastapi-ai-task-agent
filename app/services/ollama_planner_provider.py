@@ -21,7 +21,7 @@ import json
 import httpx
 from pydantic import ValidationError
 
-from app.config import OLLAMA_BASE_URL, OLLAMA_MODEL
+from app.config import OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT_SECONDS
 from app.services.agent_plan import AgentPlan
 
 _PLANNING_SYSTEM_PROMPT = (
@@ -55,11 +55,6 @@ _PLANNING_SYSTEM_PROMPT = (
     '{"tool": "mark_task_done", "arguments": {}, "task_id_from_step": 1}]}'
 )
 
-# Local Ollama can be slow to respond on a cold model load, same generous
-# timeout as the single-step Ollama provider.
-_REQUEST_TIMEOUT_SECONDS = 30.0
-
-
 class OllamaPlanningError(Exception):
     """Raised whenever the Ollama planner can't produce a trustworthy plan.
 
@@ -78,7 +73,7 @@ def _call_ollama_plan(payload: dict) -> dict:
     ollama_decision_provider._call_ollama) so tests can monkeypatch it
     instead of making a real HTTP call.
     """
-    response = httpx.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload, timeout=_REQUEST_TIMEOUT_SECONDS)
+    response = httpx.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload, timeout=OLLAMA_TIMEOUT_SECONDS)
     response.raise_for_status()
     return response.json()
 

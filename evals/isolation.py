@@ -123,6 +123,13 @@ def isolated_app_client():
         # immediately, regardless of what was parsed at import time.
         previous_api_keys = dict(config.API_KEYS)
         config.API_KEYS[EVAL_API_KEY] = EVAL_USER_ID
+        # The rate limiter (app/services/rate_limiter.py) must never
+        # affect eval results - a growing dataset run back-to-back
+        # shouldn't start failing cases just because it crossed a rate
+        # limit meant for accidental/abusive HTTP clients, not this
+        # runner. Read live by the limiter, like config.API_KEYS above.
+        previous_rate_limit_enabled = config.RATE_LIMIT_ENABLED
+        config.RATE_LIMIT_ENABLED = False
 
         Base.metadata.create_all(bind=engine)
         app.dependency_overrides[get_db] = _override_get_db
@@ -145,6 +152,7 @@ def isolated_app_client():
             database.engine = previous_engine
             config.API_KEYS.clear()
             config.API_KEYS.update(previous_api_keys)
+            config.RATE_LIMIT_ENABLED = previous_rate_limit_enabled
             engine.dispose()
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

@@ -12,7 +12,7 @@ anything here fails.
 
 import anthropic
 
-from app.config import ANTHROPIC_MODEL
+from app.config import ANTHROPIC_MAX_RETRIES, ANTHROPIC_MODEL, ANTHROPIC_TIMEOUT_SECONDS
 from app.services import tool_schemas
 from app.services.tool_decision import ToolDecision
 from app.services.tool_registry import AVAILABLE_TOOLS
@@ -57,8 +57,14 @@ def _build_claude_tools() -> list[dict]:
 
 def _get_client() -> anthropic.Anthropic:
     """Construct the Anthropic client. Kept as its own function so tests
-    can monkeypatch it instead of making a real API call."""
-    return anthropic.Anthropic(timeout=10.0)
+    can monkeypatch it instead of making a real API call.
+
+    max_retries makes the SDK's own bounded retry (connection errors,
+    408/409/429/5xx only - never a 4xx) explicit/configurable instead of
+    relying on its invisible default (which is also 2) - see
+    app.config.ANTHROPIC_MAX_RETRIES.
+    """
+    return anthropic.Anthropic(timeout=ANTHROPIC_TIMEOUT_SECONDS, max_retries=ANTHROPIC_MAX_RETRIES)
 
 
 def _parse_tool_use(block) -> ToolDecision:

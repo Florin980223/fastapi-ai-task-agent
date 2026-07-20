@@ -14,15 +14,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 class TaskCreate(BaseModel):
     """Shape of the JSON body expected on POST /tasks."""
 
-    title: str
-    description: str | None = None
+    title: str = Field(max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
 
 
 class TaskUpdate(BaseModel):
     """Shape of the JSON body expected on PATCH /tasks/{task_id}."""
 
-    title: str | None = None
-    description: str | None = None
+    title: str | None = Field(default=None, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
 
 
 class TaskResponse(BaseModel):
@@ -60,7 +60,7 @@ class ToolResponse(BaseModel):
 class DecideToolRequest(BaseModel):
     """Shape of the JSON body expected on POST /agent/decide-tool."""
 
-    message: str
+    message: str = Field(max_length=4000)
 
 
 class DecideToolResponse(BaseModel):
@@ -79,7 +79,7 @@ class ExecuteRequest(BaseModel):
     previous response to continue answering a pending clarification.
     """
 
-    message: str
+    message: str = Field(max_length=4000)
     conversation_id: uuid.UUID | None = None
 
 

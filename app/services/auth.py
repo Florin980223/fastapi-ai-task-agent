@@ -21,7 +21,7 @@ text.
 import secrets
 from dataclasses import dataclass
 
-from fastapi import HTTPException, Security, status
+from fastapi import HTTPException, Request, Security, status
 from fastapi.security import APIKeyHeader
 
 from app import config
@@ -52,7 +52,7 @@ def _lookup_user_id(candidate: str) -> str | None:
     return matched_user_id
 
 
-def get_current_user(api_key: str | None = Security(_api_key_header)) -> AuthenticatedUser:
+def get_current_user(request: Request, api_key: str | None = Security(_api_key_header)) -> AuthenticatedUser:
     if api_key is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing X-API-Key header")
 
@@ -60,4 +60,9 @@ def get_current_user(api_key: str | None = Security(_api_key_header)) -> Authent
     if user_id is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
 
+    # Only ever set after a successful authentication - read by
+    # app/middleware.py's access-log line, so user_id appears in logs
+    # only once a request has actually proven who it is (never for a
+    # missing/invalid key, and never the attempted key itself).
+    request.state.user_id = user_id
     return AuthenticatedUser(user_id=user_id)

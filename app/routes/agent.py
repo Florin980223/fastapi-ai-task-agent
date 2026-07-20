@@ -25,7 +25,7 @@ from app.schemas import (
     StepResultResponse,
     ToolResponse,
 )
-from app.services import agent_decision, agent_planner, agent_service, agent_trace_service, clarification, conversation_memory, tool_schemas
+from app.services import agent_decision, agent_planner, agent_service, agent_trace_service, clarification, conversation_memory, rate_limiter, tool_schemas
 from app.services.auth import AuthenticatedUser, get_current_user
 from app.services.conversation_memory import PendingClarification, PendingConfirmation
 from app.services.tool_decision import ToolDecision
@@ -69,7 +69,11 @@ def get_run(run_id: uuid.UUID, db: Session = Depends(get_db), current_user: Auth
 
 
 @router.post("/execute", response_model=ExecuteResponse)
-def execute(request: ExecuteRequest, db: Session = Depends(get_db), current_user: AuthenticatedUser = Depends(get_current_user)):
+def execute(
+    request: ExecuteRequest,
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(rate_limiter.enforce_execute_rate_limit),
+):
     # Every HTTP request gets its own run_id and its own persistent trace
     # - even a follow-up reply ("yes", a clarification answer) on the same
     # conversation_id. See agent_trace_service.record_execute_run, called

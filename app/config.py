@@ -150,3 +150,111 @@ CLARIFICATION_TTL_SECONDS = _parse_positive_int_seconds(
 CONTEXT_TTL_SECONDS = _parse_positive_int_seconds(
     "CONTEXT_TTL_SECONDS", os.environ.get("CONTEXT_TTL_SECONDS", "7200")
 )
+
+
+class HardeningConfigError(RuntimeError):
+    """Raised when a reliability/security-hardening env var is set but
+    invalid. Always fails fast at import time, same reasoning as
+    ApiKeyConfigError/ConversationStateConfigError - a bad value should
+    never silently fall back to something else and start serving
+    requests.
+    """
+
+
+def _parse_positive_int(name: str, raw: str) -> int:
+    raw = raw.strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        raise HardeningConfigError(f"{name} must be a positive integer, got {raw!r}.")
+    if value <= 0:
+        raise HardeningConfigError(f"{name} must be a positive integer, got {value}.")
+    return value
+
+
+def _parse_non_negative_int(name: str, raw: str) -> int:
+    raw = raw.strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        raise HardeningConfigError(f"{name} must be a non-negative integer, got {raw!r}.")
+    if value < 0:
+        raise HardeningConfigError(f"{name} must be a non-negative integer, got {value}.")
+    return value
+
+
+def _parse_positive_float(name: str, raw: str) -> float:
+    raw = raw.strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        raise HardeningConfigError(f"{name} must be a positive number, got {raw!r}.")
+    if value <= 0:
+        raise HardeningConfigError(f"{name} must be a positive number, got {value}.")
+    return value
+
+
+def _parse_bool(name: str, raw: str) -> bool:
+    normalized = raw.strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise HardeningConfigError(f'{name} must be "true" or "false", got {raw!r}.')
+
+
+_VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
+
+def _parse_log_level(raw: str) -> str:
+    normalized = raw.strip().upper()
+    if normalized not in _VALID_LOG_LEVELS:
+        raise HardeningConfigError(f"LOG_LEVEL must be one of {sorted(_VALID_LOG_LEVELS)}, got {raw!r}.")
+    return normalized
+
+
+# Log verbosity for the whole app (see app/logging_config.py).
+LOG_LEVEL = _parse_log_level(os.environ.get("LOG_LEVEL", "INFO"))
+
+# Maximum size, in bytes, of any incoming HTTP request body. Enforced by
+# app.middleware.MaxBodySizeMiddleware before routing/auth/parsing ever
+# run. Default (64 KiB) is comfortably above any legitimate payload this
+# API accepts (a maxed-out ExecuteRequest is well under 5 KB).
+MAX_REQUEST_BODY_BYTES = _parse_positive_int(
+    "MAX_REQUEST_BODY_BYTES", os.environ.get("MAX_REQUEST_BODY_BYTES", "65536")
+)
+
+# Explicit, configurable timeouts for every external HTTP call this app
+# makes - see app/services/weather_service.py,
+# app/services/ollama_decision_provider.py,
+# app/services/ollama_planner_provider.py, and
+# app/services/anthropic_decision_provider.py.
+OPEN_METEO_TIMEOUT_SECONDS = _parse_positive_float(
+    "OPEN_METEO_TIMEOUT_SECONDS", os.environ.get("OPEN_METEO_TIMEOUT_SECONDS", "5.0")
+)
+OLLAMA_TIMEOUT_SECONDS = _parse_positive_float(
+    "OLLAMA_TIMEOUT_SECONDS", os.environ.get("OLLAMA_TIMEOUT_SECONDS", "30.0")
+)
+ANTHROPIC_TIMEOUT_SECONDS = _parse_positive_float(
+    "ANTHROPIC_TIMEOUT_SECONDS", os.environ.get("ANTHROPIC_TIMEOUT_SECONDS", "10.0")
+)
+
+# Bounded retries the Anthropic SDK itself performs (connection errors,
+# 408/409/429/5xx only - never a 4xx). Made explicit/configurable
+# instead of relying on the SDK's invisible default (which is also 2).
+ANTHROPIC_MAX_RETRIES = _parse_non_negative_int(
+    "ANTHROPIC_MAX_RETRIES", os.environ.get("ANTHROPIC_MAX_RETRIES", "2")
+)
+
+# Minimal in-memory, per-user, fixed-window rate limit on POST
+# /agent/execute (see app/services/rate_limiter.py). Not a security
+# boundary and not correct across multiple uvicorn workers - see
+# README's "Rate limiting" section. RATE_LIMIT_ENABLED=false disables
+# it entirely (used by the test suite and the evaluation runner).
+RATE_LIMIT_ENABLED = _parse_bool("RATE_LIMIT_ENABLED", os.environ.get("RATE_LIMIT_ENABLED", "true"))
+RATE_LIMIT_REQUESTS = _parse_positive_int(
+    "RATE_LIMIT_REQUESTS", os.environ.get("RATE_LIMIT_REQUESTS", "120")
+)
+RATE_LIMIT_WINDOW_SECONDS = _parse_positive_int(
+    "RATE_LIMIT_WINDOW_SECONDS", os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "60")
+)

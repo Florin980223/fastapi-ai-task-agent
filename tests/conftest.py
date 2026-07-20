@@ -18,6 +18,13 @@ OTHER_TEST_API_KEY = "test-key-bob"
 OTHER_TEST_USER_ID = "bob"
 os.environ["API_KEYS"] = f"{TEST_API_KEY}:{TEST_USER_ID},{OTHER_TEST_API_KEY}:{OTHER_TEST_USER_ID}"
 
+# The rate limiter (app/services/rate_limiter.py) is disabled by default
+# for the whole test suite - the same unconditional-override pattern as
+# DATABASE_URL/API_KEYS above - so none of the other tests need to know
+# it exists. tests/test_rate_limit.py re-enables it locally via
+# monkeypatching app.config directly, read live by the limiter.
+os.environ["RATE_LIMIT_ENABLED"] = "false"
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -202,4 +209,19 @@ def reset_tasks_db():
     Base.metadata.create_all(bind=test_engine)
     yield
     Base.metadata.drop_all(bind=test_engine)
+
+
+@pytest.fixture(autouse=True)
+def reset_rate_limiter():
+    """Clear the in-memory rate limiter's per-user counters before and
+    after every test - same reasoning as reset_tasks_db above, so a
+    test in tests/test_rate_limit.py that exhausts alice's limit can
+    never leak into an unrelated, later test that reuses the same
+    user_id.
+    """
+    from app.services import rate_limiter
+
+    rate_limiter.reset()
+    yield
+    rate_limiter.reset()
 

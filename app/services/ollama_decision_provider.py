@@ -14,7 +14,7 @@ import json
 
 import httpx
 
-from app.config import OLLAMA_BASE_URL, OLLAMA_MODEL
+from app.config import OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT_SECONDS
 from app.services import tool_schemas
 from app.services.tool_decision import ToolDecision
 from app.services.tool_registry import AVAILABLE_TOOLS
@@ -46,9 +46,9 @@ _SYSTEM_PROMPT = (
     '- "Rename one of my tasks" -> call update_task with no arguments.'
 )
 
-# Local Ollama can be slow to respond on a cold model load, so this is more
-# generous than the Anthropic provider's timeout.
-_REQUEST_TIMEOUT_SECONDS = 30.0
+# Local Ollama can be slow to respond on a cold model load - see
+# app.config.OLLAMA_TIMEOUT_SECONDS for the actual (generous, more so
+# than the Anthropic provider's) timeout value used below.
 
 
 class OllamaDecisionError(Exception):
@@ -109,7 +109,7 @@ def _call_ollama(payload: dict) -> dict:
     Kept as its own function so tests can monkeypatch it instead of
     making a real HTTP call.
     """
-    response = httpx.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload, timeout=_REQUEST_TIMEOUT_SECONDS)
+    response = httpx.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload, timeout=OLLAMA_TIMEOUT_SECONDS)
     response.raise_for_status()
     return response.json()
 

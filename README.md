@@ -90,6 +90,67 @@ API response. No API keys, headers, or environment secrets are ever
 recorded; large tool results are stored as a bounded summary rather than
 in full.
 
+## Reliability & request handling
+
+**Request correlation.** Every response carries an `X-Request-ID`
+header - either echoed back from a client-supplied one (if it's a safe
+opaque token, `^[A-Za-z0-9_-]{1,100}$`) or freshly generated otherwise.
+It's distinct from `run_id` above: `request_id` correlates *this HTTP
+request's* logs; `run_id` is a durable, queryable record of one agent
+decision. Every log line emitted during a request - including ones
+already in the codebase before this feature, unchanged - is tagged with
+the same `request_id`, so a single request's logs can be grepped out of
+`docker compose logs` even under concurrent traffic.
+
+**Structured logs.** One key=value line per log record, e.g.:
+
+```
+2026-07-20T10:30:00.123Z level=INFO logger=app.middleware request_id=3f9e2a msg="request completed" method=POST path=/agent/execute status=200 duration_ms=42 user_id=alice
+```
+
+`LOG_LEVEL` (default `INFO`) controls verbosity. `user_id` is only ever
+attached *after* a successful authentication (never for a missing/
+invalid key, and never the attempted key itself); request/response
+bodies, headers (`X-API-Key`/`Authorization`), and secrets are never
+logged anywhere.
+
+**External-service timeouts & retries.**
+
+| Provider | Timeout var (default) | Retry policy |
+|---|---|---|
+| Open-Meteo (weather) | `OPEN_METEO_TIMEOUT_SECONDS` (5.0) | 1 bounded retry on a transport-level failure only (connection/timeout) - never on an HTTP status error. Idempotent GET, no side effects. |
+| Ollama | `OLLAMA_TIMEOUT_SECONDS` (30.0) | None - any failure already falls back to `rule_based` safely (see Configuration above); a retry would only add latency to an already-handled path. |
+| Anthropic | `ANTHROPIC_TIMEOUT_SECONDS` (10.0), `ANTHROPIC_MAX_RETRIES` (2) | The SDK's own bounded retry (connection errors, 408/409/429/5xx only), made explicit/configurable instead of an invisible default. |
+| Task mutations (create/update/delete/mark-done) | n/a | No HTTP calls at all - pure DB writes, nothing to retry. |
+
+**Request size & field limits.** `MAX_REQUEST_BODY_BYTES` (default
+`65536`) rejects an oversized body with `413` before routing, auth, or
+parsing ever run. `ExecuteRequest.message`/`DecideToolRequest.message`
+are capped at 4000 characters, and `TaskCreate`/`TaskUpdate`
+title/description at 200/2000 - only an upper bound was added (no
+`min_length` anywhere), so an empty agent message still behaves exactly
+as before.
+
+**Rate limiting.** A minimal in-memory, per-user, fixed-window limiter
+on `POST /agent/execute` only (`RATE_LIMIT_ENABLED`, default `true`;
+`RATE_LIMIT_REQUESTS`, default `120`; `RATE_LIMIT_WINDOW_SECONDS`,
+default `60`) - exceeding it returns `429` with a `Retry-After` header.
+It's keyed by the authenticated `user_id` only, never the raw API key,
+and it is **not a security boundary** - it exists to catch accidental
+abuse (e.g. a client stuck in a retry loop), not a determined attacker,
+who could simply wait out the window. It is also **not correct across
+multiple uvicorn workers**: each worker keeps its own independent
+counter, so real throughput becomes ~N× the configured limit with N
+workers - see "One worker, always" below, which this project already
+runs as. Set `RATE_LIMIT_ENABLED=false` to disable it entirely.
+
+**Error responses.** Any exception without a more specific handler
+(everything else - 401, 404, 422, the conversation-state 500s - already
+has one, and is unaffected) returns a fixed `{"detail": "Internal
+Server Error"}` body with no exception text, traceback, or DB detail.
+The real exception is logged server-side only, tagged with the
+request's `request_id`.
+
 ## Evaluations
 
 A separate, offline evaluation suite - distinct from `pytest` - measures
@@ -291,8 +352,11 @@ recreates the container).
 - The published port is bound to `127.0.0.1` only — not exposed to
   your LAN by default.
 - This stage intentionally has no HTTPS/TLS termination, reverse
-  proxy, rate limiting, or production secrets manager — it's a local
-  demo/dev setup, not a deployment-ready configuration.
+  proxy, or production secrets manager — it's a local demo/dev setup,
+  not a deployment-ready configuration. A lightweight per-user,
+  single-process request-rate guard does exist (see "Reliability &
+  request handling" above) — it's a basic abuse/accident guard, not a
+  substitute for real perimeter security.
 
 ## Continuous Integration (CI)
 
