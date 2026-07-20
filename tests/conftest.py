@@ -34,6 +34,7 @@ from sqlalchemy.pool import StaticPool
 import app.database as database
 from app.database import Base, get_db
 from app.main import app
+from app.services import schema_migration
 
 # A separate in-memory SQLite database dedicated to tests. StaticPool
 # forces SQLAlchemy to reuse a single connection for the whole engine -
@@ -151,11 +152,25 @@ def restart_client_factory(tmp_path):
     the `client` fixture's shared in-memory :memory: + StaticPool
     engine, a real file is what makes "independent process, same disk
     state" meaningful to prove). Entering the context also runs the
-    app's real lifespan (init_db(), i.e. Base.metadata.create_all()),
-    exactly as a real process restart would - which is a no-op against
-    tables that already exist on disk. Overrides get_db, database.
-    SessionLocal, and database.engine (mirroring evals/isolation.py's
-    isolated_app_client), and restores the previous overrides on exit.
+    app's real lifespan (init_db(), which now only *verifies* the
+    schema - see app/services/schema_migration.py), exactly as a real
+    process restart would.
+
+    init_db() is deliberately never allowed to create or stamp a
+    schema itself, so - as an explicitly-named test fixture, exactly
+    the kind of caller README.md's "Database migrations (Alembic)"
+    section carves out for Base.metadata.create_all() - this fixture
+    bootstraps the schema itself (create_all + stamp_head_for_tests)
+    before ever entering the TestClient context, so init_db()'s
+    verify-only check finds a database it recognizes as current. Both
+    calls are safe no-ops on the second (simulated-restart) invocation
+    against the same on-disk file: create_all only ever adds missing
+    tables, and stamp_head_for_tests only ever rewrites the same
+    already-correct revision id.
+
+    Overrides get_db, database.SessionLocal, and database.engine
+    (mirroring evals/isolation.py's isolated_app_client), and restores
+    the previous overrides on exit.
     """
     db_path = tmp_path / "restart_test.db"
 
@@ -178,6 +193,8 @@ def restart_client_factory(tmp_path):
         app.dependency_overrides[get_db] = _override_get_db
         database.SessionLocal = session_local
         database.engine = engine
+        Base.metadata.create_all(bind=engine)
+        schema_migration.stamp_head_for_tests(engine)
 
         try:
             with TestClient(app, headers={"X-API-Key": TEST_API_KEY}) as test_client:

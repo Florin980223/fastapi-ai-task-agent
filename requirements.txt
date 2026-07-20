@@ -5,3 +5,4 @@ pytest
 anthropic
 python-dotenv
 sqlalchemy
+alembic>=1.13.0

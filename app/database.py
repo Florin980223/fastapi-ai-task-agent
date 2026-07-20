@@ -33,11 +33,21 @@ def get_db():
 
 
 def init_db() -> None:
-    """Create all tables that don't exist yet, then patch any pre-existing
-    table that predates the user_id column. Safe to call on every startup.
-    """
-    from app import db_models  # noqa: F401 - registers Task on Base.metadata
-    from app.services.db_migrate import backfill_legacy_user_id_columns
+    """Verify the database's schema is exactly what Alembic's latest
+    migration expects. Safe to call on every startup - it never
+    creates, alters, migrates, or stamps anything.
 
-    Base.metadata.create_all(bind=engine)
-    backfill_legacy_user_id_columns(engine)
+    Alembic (`python -m alembic upgrade head`, run by a human) is the
+    only thing that changes a real application database's schema -
+    see app.services.schema_migration and README.md's "Database
+    migrations (Alembic)" section for the one-time adoption steps an
+    existing pre-Alembic database needs before it can start here.
+    Raises SchemaNotAdoptedError/SchemaOutOfDateError (both
+    RuntimeError) with an actionable message rather than silently
+    fixing anything, so a missing/outdated schema fails loudly instead
+    of drifting.
+    """
+    from app import db_models  # noqa: F401 - registers all models on Base.metadata
+    from app.services.schema_migration import ensure_schema_is_current
+
+    ensure_schema_is_current(engine)

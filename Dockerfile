@@ -26,6 +26,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app/ ./app/
 COPY docker/healthcheck.py ./docker/healthcheck.py
 
+# alembic.ini + alembic/ (config and migration scripts only - never a
+# database file, .dockerignore already excludes every *.db/*.db-journal
+# from the build context regardless) - needed so `docker compose run
+# --rm app python -m alembic ...` works against the mounted volume, and
+# so app/services/schema_migration.py's startup schema check (which
+# runs inside this same container) can find alembic.ini. Never run
+# automatically by CMD below - see that instruction's own comment.
+COPY alembic.ini ./alembic.ini
+COPY alembic/ ./alembic/
+
 # Dedicated non-root user. App code under /app stays root-owned and
 # read-only for appuser (it only needs read+execute, which the default
 # COPY permissions above already provide). Only /data - where the
@@ -55,11 +65,16 @@ USER appuser
 
 # GET /health is deliberately public (no X-API-Key required) - see
 # app/main.py and app/services/auth.py. start-period is 10s (not the
-# default 0s/5s) because a cold container's init_db() + the legacy
-# user_id migration + importing anthropic/sqlalchemy can take a few
-# seconds longer than a bare "hello world" app, and a false
-# "unhealthy" flip during that window is exactly what start-period
-# exists to prevent.
+# default 0s/5s) because a cold container's startup schema check
+# (app/services/schema_migration.py) + importing anthropic/sqlalchemy/
+# alembic can take a few seconds longer than a bare "hello world" app,
+# and a false "unhealthy" flip during that window is exactly what
+# start-period exists to prevent. If the volume's database isn't
+# Alembic-adopted or is out of date, the container exits (and, per
+# `restart: unless-stopped` in compose.yaml, keeps retrying) instead of
+# ever reaching a healthy state - see README.md's "Database migrations
+# (Alembic)" section for the `docker compose run --rm app python -m
+# alembic upgrade head` command that fixes that.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD ["python", "docker/healthcheck.py"]
 

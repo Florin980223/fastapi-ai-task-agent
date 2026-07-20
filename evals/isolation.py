@@ -16,14 +16,14 @@ agent_trace_service.record_execute_run deliberately opens its own
 database.SessionLocal() session (see that module's docstring), and the
 third because app.database.init_db() - run on every app startup via the
 FastAPI lifespan, which TestClient(app, ...) triggers as a context
-manager - creates tables (and now also runs the legacy user_id
-backfill, see app/services/db_migrate.py) directly against the module-
-level engine, not through SessionLocal at all. Overriding all three,
-rather than relying on "set DATABASE_URL before app.database is
-imported", is what makes this correct even when invoked from inside an
-already-running pytest process (where app.database was already
-imported, and bound, once by tests/conftest.py) - and, critically, is
-what keeps every eval run fully off the real on-disk tasks.db.
+manager - now verifies the schema (see app/services/schema_migration.py)
+directly against the module-level engine, not through SessionLocal at
+all. Overriding all three, rather than relying on "set DATABASE_URL
+before app.database is imported", is what makes this correct even when
+invoked from inside an already-running pytest process (where
+app.database was already imported, and bound, once by
+tests/conftest.py) - and, critically, is what keeps every eval run
+fully off the real on-disk tasks.db.
 """
 
 import shutil
@@ -41,7 +41,7 @@ import app.database as database
 from app import config
 from app.database import Base, get_db
 from app.main import app
-from app.services import weather_service
+from app.services import schema_migration, weather_service
 from evals import EVAL_API_KEY, EVAL_USER_ID
 
 # A fixed, deterministic weather reading - Open-Meteo's uptime must never
@@ -131,13 +131,23 @@ def isolated_app_client():
         previous_rate_limit_enabled = config.RATE_LIMIT_ENABLED
         config.RATE_LIMIT_ENABLED = False
 
+        # init_db() (run by the FastAPI lifespan below, via TestClient's
+        # context manager) is deliberately verify-only now - it never
+        # creates or stamps a schema itself (see
+        # app/services/schema_migration.py). As an eval temporary
+        # database - exactly the kind of caller README.md's "Database
+        # migrations (Alembic)" section carves out for
+        # Base.metadata.create_all() - this bootstraps the schema
+        # itself, then stamps it at head, so init_db()'s verify-only
+        # check finds a database it recognizes as current.
         Base.metadata.create_all(bind=engine)
+        schema_migration.stamp_head_for_tests(engine)
         app.dependency_overrides[get_db] = _override_get_db
         database.SessionLocal = eval_session_local
         # init_db() (run by the FastAPI lifespan below) uses this module-
-        # level engine directly - without overriding it too, table
-        # creation and the legacy user_id backfill would run against the
-        # real on-disk tasks.db's engine instead of this temp one.
+        # level engine directly - without overriding it too, its schema
+        # check would run against the real on-disk tasks.db's engine
+        # instead of this temp one.
         database.engine = engine
 
         try:

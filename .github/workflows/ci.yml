@@ -55,6 +55,13 @@ jobs:
           DATABASE_URL: "sqlite:///${{ runner.temp }}/ci-evals.db"
         run: python -m evals.run --mode rule_based
 
+      - name: Verify Alembic baseline migration
+        env:
+          DATABASE_URL: "sqlite:///${{ runner.temp }}/ci-alembic-check.db"
+        run: |
+          python -m alembic upgrade head
+          python -m alembic check
+
   docker:
     name: Docker build
     runs-on: ubuntu-latest

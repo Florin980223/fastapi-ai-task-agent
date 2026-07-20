@@ -37,8 +37,10 @@ into a safe plan runs nothing and reports a clear error instead of falling
 back to guessing a single action.
 
 `DATABASE_URL` controls where task data is persisted. It defaults to a
-local SQLite file (`sqlite:///./tasks.db`) in the project root, created
-automatically the first time the app starts — no setup required.
+local SQLite file (`sqlite:///./tasks.db`) in the project root. Schema
+is managed by Alembic, not automatically on startup — see "Database
+migrations (Alembic)" below, which a fresh clone needs to run **once**
+before the app will start at all.
 
 Pending clarifications, pending destructive-action confirmations, and
 remembered task context ("it"/"that one") are persisted in the same
@@ -48,6 +50,134 @@ survive app restarts. Each has its own TTL, in seconds:
 (default `900`), and `CONTEXT_TTL_SECONDS` (default `7200`) — all must
 be positive integers, checked at startup. See "One worker, always"
 below for the current concurrency limits of this design.
+
+## Database migrations (Alembic)
+
+Schema is versioned with [Alembic](https://alembic.sqlalchemy.org/)
+(`alembic.ini`, `alembic/env.py`, `alembic/versions/`) instead of being
+created automatically. **Alembic — a human running `python -m alembic
+upgrade head` — is the only thing that ever creates, alters, or stamps
+a real application database's schema.** On every startup, the app
+(`app.database.init_db()`, via `app/services/schema_migration.py`)
+only ever *verifies* that the database is already fully migrated —
+never creates, alters, migrates, or stamps anything itself — and fails
+fast with a clear, actionable error otherwise:
+
+- Empty database → refuses to start; run `python -m alembic upgrade
+  head` first.
+- Has tables but was never adopted by Alembic (no `alembic_version`
+  table) → refuses to start; run the adoption procedure below first.
+- Adopted, but not at the latest revision → refuses to start; run
+  `python -m alembic upgrade head`.
+- Adopted and current → starts normally (fast, silent, same "safe to
+  call on every startup" promise as before).
+
+`Base.metadata.create_all()` still exists in the codebase, but only for
+isolated pytest databases, eval temporary databases, and the dedicated
+test/eval fixtures that bootstrap their own throwaway engines
+(`tests/conftest.py`'s `restart_client_factory`,
+`evals/isolation.py`'s `isolated_app_client()`) — it is never reachable
+from a normal dev/Docker/production startup anymore.
+
+### Fresh database (new clone, or `tasks.db` deleted)
+
+```bash
+python -m alembic upgrade head
+uvicorn app.main:app --reload
+```
+
+### An existing `tasks.db` that already has `user_id` and `conversation_states`
+
+Never blindly `stamp` — verify first, every time:
+
+```bash
+# 1. Backup.
+cp tasks.db "tasks.db.backup-$(date +%Y%m%d%H%M%S)"
+
+# 2. Verify the live schema exactly matches the baseline migration.
+#    (Not `alembic check` here - that command requires the database to
+#    already be stamped at head before it can even run. This uses the
+#    same structural comparison, without that precondition.)
+python -m app.services.schema_migration
+# -> "Schema matches the baseline migration exactly - safe to run `alembic stamp head`."
+
+# 3. Adopt - no DDL, no data touched.
+alembic stamp head
+```
+
+### A legacy, pre-authentication `tasks.db` (missing `user_id`, possibly missing `conversation_states`)
+
+Same shape as above, with one extra step to bring the schema fully
+current first, reusing the app's own existing, already-tested logic
+(safe no-ops if a piece is already present):
+
+```bash
+# 1. Backup.
+cp tasks.db "tasks.db.backup-$(date +%Y%m%d%H%M%S)"
+
+# 2. Bring the schema fully current: create.all() only ever adds
+#    missing tables; backfill_legacy_user_id_columns only ever adds a
+#    missing user_id column (backfilled with the __unmigrated__
+#    sentinel - see below); the index loop adds any index missing from
+#    a table that already existed (create_all() does not add indexes
+#    to tables it didn't create itself - this is the one gap
+#    backfill_legacy_user_id_columns leaves, since it only ever adds
+#    the column, not its accompanying index).
+python -c "
+from app.database import Base, engine
+from app import db_models
+from app.services.db_migrate import backfill_legacy_user_id_columns
+Base.metadata.create_all(bind=engine)
+backfill_legacy_user_id_columns(engine)
+for table in Base.metadata.tables.values():
+    for index in table.indexes:
+        index.create(bind=engine, checkfirst=True)
+"
+
+# 3. Verify - must report a clean match before stamping.
+python -m app.services.schema_migration
+
+# 4. Adopt - no DDL, no data touched.
+alembic stamp head
+```
+
+Rows created before authentication existed are preserved with
+`user_id = "__unmigrated__"` (a reserved sentinel that can never match
+a real configured user, so they become inert/inaccessible via the API
+rather than silently landing on whichever user authenticates first —
+see `.env.example` for how to manually reclaim them).
+
+`app/services/db_migrate.py`'s `backfill_legacy_user_id_columns` is
+**not** converted into an Alembic migration and is **not** retired by
+this change — it runs first, as the one-time adoption helper in step 2
+above. Turning it into a migration would either duplicate this exact
+logic in two places, or force every not-yet-adopted database through
+Alembic before it can even reach a state Alembic recognizes, which is
+circular. It stays in the codebase for anyone who still has a
+never-yet-adopted pre-auth database; retiring it is a separate, later
+decision once none are believed to exist anymore.
+
+### Writing a new migration
+
+```bash
+alembic revision -m "describe the change"    # or --autogenerate, then review carefully
+alembic upgrade head
+```
+
+`env.py` configures `render_as_batch=True`, since SQLite can't perform
+most `ALTER TABLE` operations directly — this makes
+`op.batch_alter_table(...)` available and correct for any future
+migration without extra setup. **Never trust `--autogenerate` output
+blindly** — diff it against `app/db_models.py` by hand before
+committing, the same way the baseline revision
+(`alembic/versions/0001_baseline.py`) was reviewed.
+
+The baseline's `downgrade()` deliberately raises rather than dropping
+every table: there's no revision below it, so "downgrading" could only
+ever mean destroying all data. The rollback path for the baseline is
+restoring a pre-migration backup, not `alembic downgrade`. Future
+migrations should implement a real `downgrade()` unless they're
+similarly irreversible, in which case block-and-document the same way.
 
 ## Run
 
@@ -220,11 +350,47 @@ Copy-Item .env.docker.example .env.docker
 file Compose reads secrets from at runtime (`compose.yaml` has no
 hardcoded keys, and none are ever baked into the image).
 
+### Database migrations
+
+The container never runs a migration automatically on startup — the
+same "verify, don't mutate" startup check described in "Database
+migrations (Alembic)" above applies inside Docker too, against
+whatever database is in the `agent_data` volume. This means **a brand
+new volume needs one explicit migration command before the app will
+start successfully** — `docker compose up -d` alone will crash-loop
+against an empty `/data` otherwise. `alembic.ini` and `alembic/` are
+copied into the image specifically so these commands work.
+
+```powershell
+# 1. Backup first - works whether or not the container is currently
+#    running, since it reads the volume directly.
+docker run --rm -v fastapi-ai-task-agent_agent_data:/data -v ${PWD}:/backup alpine `
+    cp /data/tasks.db /backup/tasks.db.docker-backup-$(Get-Date -Format yyyyMMddHHmmss)
+
+# 2. Check the current revision (read-only; safe even against an
+#    empty/never-migrated volume).
+docker compose run --rm app python -m alembic current
+
+# 3. Apply migrations. Always `run --rm` (a one-off container against
+#    the same volume), not `exec` - `exec` requires an already-running,
+#    already-healthy container, which a fresh or out-of-date volume
+#    will never reach.
+docker compose run --rm app python -m alembic upgrade head
+
+# 4. Start the app normally - the startup check now passes.
+docker compose up -d
+```
+
+Use the same three steps (backup, `alembic current`, `alembic upgrade
+head`) before restarting after any image update that includes a new
+migration - never let `docker compose up -d` be the first command run
+against an out-of-date volume.
+
 ### Build, run, and stop
 
 ```powershell
 docker compose build              # build the fastapi-ai-task-agent:local image
-docker compose up -d              # start the container in the background
+docker compose up -d              # start the container in the background (after migrating - see above)
 docker compose ps                 # check status, including health
 docker compose logs -f app        # follow logs (Ctrl+C to stop watching)
 docker compose down               # stop and remove the container (keeps the data volume)
@@ -365,14 +531,21 @@ every push to `main`, every pull request targeting `main`, and on demand
 via `workflow_dispatch`:
 
 - **Test** — installs `requirements.txt`, runs the full `pytest` suite,
-  then runs the offline evaluation suite in `rule_based` mode
-  (`python -m evals.run --mode rule_based`). Uses fake, non-secret
-  configuration only (`API_KEYS=ci-test-key-do-not-use:ci-user`,
-  `AGENT_DECISION_PROVIDER=rule_based`, an isolated SQLite database under
-  the runner's temp directory) — your local `tasks.db` is never touched.
-- **Docker build** — builds the repo's `Dockerfile` and tags the image
-  locally (`fastapi-ai-task-agent:ci`) to catch build breakage. It never
-  pushes the image anywhere and needs no runtime API keys to build.
+  runs the offline evaluation suite in `rule_based` mode
+  (`python -m evals.run --mode rule_based`), then verifies the Alembic
+  baseline migration (`python -m alembic upgrade head` followed by
+  `python -m alembic check` against a third isolated SQLite database) -
+  this is the automated version of "don't blindly trust autogenerated
+  migration output": if `app/db_models.py` ever changes without a
+  matching new revision, this step fails immediately. Uses fake,
+  non-secret configuration only (`API_KEYS=ci-test-key-do-not-use:ci-user`,
+  `AGENT_DECISION_PROVIDER=rule_based`, three isolated SQLite databases
+  under the runner's temp directory, one per step) — your local
+  `tasks.db` is never touched.
+- **Docker build** — builds the repo's `Dockerfile` (now also copying
+  `alembic.ini`/`alembic/` into the image) and tags it locally
+  (`fastapi-ai-task-agent:ci`) to catch build breakage. It never pushes
+  the image anywhere and needs no runtime API keys to build.
 
 CI may download GitHub Actions, Python packages, and Docker base-image
 layers from their respective registries, but the application tests and
@@ -386,6 +559,7 @@ python -m pip install -r requirements.txt
 python -m pip check
 python -m pytest -q
 python -m evals.run --mode rule_based
+python -m alembic upgrade head && python -m alembic check   # against a scratch DATABASE_URL, not tasks.db
 docker build -t fastapi-ai-task-agent:ci .
 ```
 
@@ -395,5 +569,6 @@ each commit, and in the "Checks" section of a pull request.
 ## Notes
 
 - Tasks are persisted in SQLite (see `DATABASE_URL` above) — data survives
-  server restarts. Table creation happens automatically on startup; there
-  are no migrations yet (schema changes require recreating the database).
+  server restarts. Schema is versioned with Alembic (see "Database
+  migrations (Alembic)" above) — a fresh database needs `python -m
+  alembic upgrade head` once before the app will start.
