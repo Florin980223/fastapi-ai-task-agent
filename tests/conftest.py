@@ -160,12 +160,12 @@ def restart_client_factory(tmp_path):
     schema itself, so - as an explicitly-named test fixture, exactly
     the kind of caller README.md's "Database migrations (Alembic)"
     section carves out for Base.metadata.create_all() - this fixture
-    bootstraps the schema itself (create_all + stamp_head_for_tests)
+    bootstraps the schema itself (create_all + stamp_head)
     before ever entering the TestClient context, so init_db()'s
     verify-only check finds a database it recognizes as current. Both
     calls are safe no-ops on the second (simulated-restart) invocation
     against the same on-disk file: create_all only ever adds missing
-    tables, and stamp_head_for_tests only ever rewrites the same
+    tables, and stamp_head only ever rewrites the same
     already-correct revision id.
 
     Overrides get_db, database.SessionLocal, and database.engine
@@ -194,7 +194,7 @@ def restart_client_factory(tmp_path):
         database.SessionLocal = session_local
         database.engine = engine
         Base.metadata.create_all(bind=engine)
-        schema_migration.stamp_head_for_tests(engine)
+        schema_migration.stamp_head(engine)
 
         try:
             with TestClient(app, headers={"X-API-Key": TEST_API_KEY}) as test_client:

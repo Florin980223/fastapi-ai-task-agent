@@ -33,7 +33,7 @@ from app.services.schema_migration import (
     SchemaOutOfDateError,
     diff_against_baseline,
     ensure_schema_is_current,
-    stamp_head_for_tests,
+    stamp_head,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -344,16 +344,16 @@ def test_init_db_on_outdated_database_fails_without_mutation(tmp_path):
     engine.dispose()
 
 
-# --- 7. stamp_head_for_tests (the test/eval fixture helper) ------------------
+# --- 7. stamp_head (the test/eval fixture and adopt-legacy CLI helper) ------
 
 
-def test_stamp_head_for_tests_matches_the_real_upgrade_result(tmp_path):
+def test_stamp_head_matches_the_real_upgrade_result(tmp_path):
     stamped_path = tmp_path / "stamped.db"
     upgraded_path = tmp_path / "upgraded.db"
 
     stamped_engine = _engine_for(stamped_path)
     Base.metadata.create_all(bind=stamped_engine)
-    stamp_head_for_tests(stamped_engine)
+    stamp_head(stamped_engine)
 
     command.upgrade(_config_for(upgraded_path), "head")
     upgraded_engine = _engine_for(upgraded_path)

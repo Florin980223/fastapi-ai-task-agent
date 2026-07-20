@@ -1,22 +1,30 @@
-"""Alembic-aware schema verification for application startup.
+"""Alembic-aware schema verification for application startup, plus a
+safe, explicit CLI for checking and adopting an existing SQLite database
+into Alembic (`python -m app.services.schema_migration --help`).
 
-From this module's ensure_schema_is_current() on down, Alembic is the
-ONLY thing that ever creates, alters, migrates, or stamps a "real"
-application database's schema - dev, Docker, and production startup
+From ensure_schema_is_current() on down, Alembic is the ONLY thing that
+ever creates, alters, migrates, or stamps a "real" application
+database's schema - dev, Docker, and production startup
 (app.database.init_db()) all go through ensure_schema_is_current(),
 which only ever VERIFIES and raises. It never runs `alembic upgrade
 head` (or `stamp`, or any other mutating command) on the app's behalf.
-A human running `python -m alembic upgrade head` themselves is the only
-thing that changes a real application database's schema from here on.
-See README.md's "Database migrations (Alembic)" section for the exact
-adoption procedures for a fresh, already-current, or legacy database.
+A human running `python -m alembic upgrade head` themselves - or, for a
+legacy pre-Alembic database, the `adopt-legacy` CLI subcommand below -
+is the only thing that changes a real application database's schema
+from here on. See README.md's "Database migrations (Alembic)" section
+for the exact adoption procedures for a fresh, already-current, or
+legacy database.
 
 Base.metadata.create_all() still exists and is still used directly,
-but only for isolated pytest databases, eval temporary databases, and
-the dedicated test/eval fixtures below (stamp_head_for_tests) - never
-as a path a normal application startup can reach.
+but only for isolated pytest databases, eval temporary databases, the
+dedicated test/eval fixtures below (stamp_head), and inside
+adopt-legacy's own explicit, reviewed transformation - never as a path
+a normal application startup can reach on its own.
 """
 
+import argparse
+import hashlib
+import sys
 from pathlib import Path
 
 from alembic import command
@@ -24,12 +32,18 @@ from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import inspect
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _ALEMBIC_INI = _REPO_ROOT / "alembic.ini"
 _ALEMBIC_DIR = _REPO_ROOT / "alembic"
+
+# The three tables that can already exist, populated, on a legacy
+# pre-Alembic database - conversation_states never predates Alembic
+# adoption in practice, so it's never part of the "preserve existing
+# rows" safety check below (create_all() only ever creates it fresh).
+_LEGACY_PRE_EXISTING_TABLES = ("tasks", "agent_runs", "agent_run_steps")
 
 
 class SchemaNotAdoptedError(RuntimeError):
@@ -117,17 +131,18 @@ def diff_against_baseline(engine: Engine) -> list:
 
     This is the pre-stamp verification step for adopting an existing
     or legacy database (see README.md's "Database migrations
-    (Alembic)" section) - unlike the `alembic check` CLI command (and
-    command.check() below), which requires the database to already be
-    stamped at head before it can even run (it first checks that the
-    database's current revision heads match the script directory's
-    heads, and raises "Target database is not up to date" otherwise),
-    this works on a database that has never been touched by Alembic at
-    all. `alembic check` remains the right tool for ongoing drift
-    detection AFTER a database is adopted (see the CI step and
-    tests/test_alembic_migrations.py's
-    test_baseline_matches_current_orm_metadata, both of which run it
-    only after an upgrade/stamp has already happened).
+    (Alembic)" section, and the `check`/`adopt-legacy` CLI subcommands
+    below) - unlike the `alembic check` CLI command (and command.check()),
+    which requires the database to already be stamped at head before it
+    can even run (it first checks that the database's current revision
+    heads match the script directory's heads, and raises "Target
+    database is not up to date" otherwise), this works on a database
+    that has never been touched by Alembic at all. `alembic check`
+    remains the right tool for ongoing drift detection AFTER a database
+    is adopted (see the CI step and
+    tests/test_alembic_migrations.py::test_baseline_matches_current_orm_metadata,
+    both of which run it only after an upgrade/stamp has already
+    happened).
     """
     from app import db_models  # noqa: F401 - registers all models on Base.metadata
     from app.database import Base
@@ -137,39 +152,273 @@ def diff_against_baseline(engine: Engine) -> list:
         return compare_metadata(context, Base.metadata)
 
 
-def stamp_head_for_tests(engine: Engine) -> None:
+def stamp_head(engine: Engine) -> None:
     """Records `engine`'s database as already being at the latest
     Alembic revision, without running any DDL.
 
-    NOT used by ensure_schema_is_current()/init_db() above - this is
-    only for test/eval fixtures that bootstrap a throwaway database via
-    Base.metadata.create_all() directly and then trigger the real
-    FastAPI lifespan (which calls init_db()) against it - see
-    tests/conftest.py's restart_client_factory and
-    evals/isolation.py's isolated_app_client(). Without this,
-    ensure_schema_is_current() would correctly, but unhelpfully for a
-    test, refuse to proceed against a table-having-but-unstamped
-    database, since init_db() itself is never allowed to stamp
-    anything on its own.
+    Two callers, both deliberate about never letting
+    ensure_schema_is_current()/init_db() do this themselves:
+    - Test/eval fixtures that bootstrap a throwaway database via
+      Base.metadata.create_all() directly and then trigger the real
+      FastAPI lifespan (which calls init_db()) against it - see
+      tests/conftest.py's restart_client_factory and
+      evals/isolation.py's isolated_app_client(). Without this,
+      ensure_schema_is_current() would correctly, but unhelpfully for a
+      test, refuse to proceed against a table-having-but-unstamped
+      database.
+    - This module's own `adopt-legacy` CLI subcommand, as the final
+      step of a legacy database's adoption - only ever called after
+      diff_against_baseline(engine) has already returned [] and the
+      pre-existing data has already been verified unchanged.
     """
     cfg = _alembic_config()
     cfg.set_main_option("sqlalchemy.url", str(engine.url))
     command.stamp(cfg, "head")
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _format_diff_entry(entry) -> str:
+    """A concise, bounded one-line summary of a single autogenerate
+    diff tuple - the raw tuples compare_metadata()/diff_against_baseline()
+    return include full SQLAlchemy Table/Index/Column reprs, hundreds of
+    characters each, which is not "concise" for a human reading CLI
+    output.
+    """
+    op_type = entry[0]
+    target = entry[1] if len(entry) > 1 else None
+
+    if op_type in ("add_table", "remove_table") and hasattr(target, "name"):
+        return f"{op_type}: {target.name}"
+
+    if op_type in ("add_index", "remove_index") and hasattr(target, "name"):
+        columns = ", ".join(column.name for column in target.columns)
+        table_name = target.table.name if target.table is not None else "?"
+        return f"{op_type}: {target.name} on {table_name}({columns})"
+
+    if op_type in ("add_constraint", "remove_constraint") and hasattr(target, "name"):
+        return f"{op_type}: {target.name}"
+
+    # Column-level and any other op shape: bounded fallback rather than
+    # dumping a full object repr.
+    text_form = f"{op_type}: {entry[1:]}"
+    return text_form if len(text_form) <= 200 else text_form[:197] + "..."
+
+
+def _read_only_sqlite_engine(path: Path) -> Engine:
+    """A SQLite connection that structurally cannot write to `path` -
+    refuses to connect at all (rather than silently creating an empty
+    file) if `path` doesn't already exist. Used by `check` so "make no
+    writes" is a property of the connection itself, not just of the
+    code that happens to run over it.
+    """
+    return create_engine(f"sqlite:///file:{path.as_posix()}?mode=ro&uri=true")
+
+
+def _read_write_sqlite_engine(path: Path) -> Engine:
+    return create_engine(f"sqlite:///{path.as_posix()}", connect_args={"check_same_thread": False})
+
+
+def _snapshot_preexisting_tables(engine: Engine, table_names: tuple[str, ...]) -> dict[str, dict]:
+    """Row-count + full per-row snapshot (ordered by id) of whichever
+    of `table_names` currently exist, using their *current* column
+    list. Used by adopt-legacy to prove its transformation only ever
+    adds columns/tables/indexes and never touches an existing row's
+    existing values.
+    """
+    inspector = inspect(engine)
+    existing = set(inspector.get_table_names())
+    snapshot: dict[str, dict] = {}
+    with engine.connect() as connection:
+        for name in table_names:
+            if name not in existing:
+                continue
+            columns = [column["name"] for column in inspector.get_columns(name)]
+            column_list = ", ".join(columns)
+            rows = connection.execute(text(f"SELECT {column_list} FROM {name} ORDER BY id")).all()
+            snapshot[name] = {"columns": columns, "rows": [tuple(row) for row in rows]}
+    return snapshot
+
+
+def _verify_preexisting_data_unchanged(engine: Engine, before: dict[str, dict]) -> list[str]:
+    """Re-fetches each table in `before` using its *original* column
+    list (so a newly-added column like user_id is never part of the
+    comparison) and compares row-for-row against the snapshot taken
+    before the transformation. Returns a list of human-readable
+    problems - empty means every pre-existing row's pre-existing
+    values are exactly unchanged.
+    """
+    problems: list[str] = []
+    with engine.connect() as connection:
+        for table_name, snapshot in before.items():
+            columns = snapshot["columns"]
+            column_list = ", ".join(columns)
+            after_rows = [
+                tuple(row) for row in connection.execute(text(f"SELECT {column_list} FROM {table_name} ORDER BY id")).all()
+            ]
+            if len(after_rows) != len(snapshot["rows"]):
+                problems.append(
+                    f"{table_name}: row count changed ({len(snapshot['rows'])} -> {len(after_rows)})"
+                )
+            elif after_rows != snapshot["rows"]:
+                problems.append(f"{table_name}: one or more existing column values changed")
+    return problems
+
+
+def _cmd_check(database_path: Path) -> int:
+    database_path = database_path.resolve()
+    if not database_path.exists():
+        print(f"Database file not found: {database_path}")
+        return 1
+
+    try:
+        engine = _read_only_sqlite_engine(database_path)
+        try:
+            diff = diff_against_baseline(engine)
+        finally:
+            engine.dispose()
+    except Exception as exc:  # never leak a raw traceback for a CLI safety tool
+        print(f"Error inspecting {database_path}: {exc}")
+        return 1
+
+    if not diff:
+        print(f"{database_path}: schema matches the baseline migration exactly.")
+        return 0
+
+    print(f"{database_path}: schema does NOT match the baseline migration:")
+    for entry in diff:
+        print(f"  {_format_diff_entry(entry)}")
+    return 1
+
+
+def _cmd_adopt_legacy(database_path: Path, backup_path: Path) -> int:
+    database_path = database_path.resolve()
+    backup_path = backup_path.resolve()
+
+    if not database_path.exists():
+        print(f"Database file not found: {database_path}")
+        return 1
+    if not backup_path.exists():
+        print(f"Backup file not found: {backup_path}. Create a backup before adopting - refusing to proceed.")
+        return 1
+
+    database_hash = _sha256(database_path)
+    backup_hash = _sha256(backup_path)
+    if database_hash != backup_hash:
+        print(
+            f"Backup does not match the database "
+            f"(sha256 {backup_hash[:12]}... != {database_hash[:12]}...). The backup "
+            "must be a byte-identical copy taken immediately before adoption - "
+            "refusing to proceed. If the database has changed since your last "
+            "backup (e.g. a previous adoption attempt already ran), take a fresh "
+            "backup of its current state first."
+        )
+        return 1
+
+    engine = _read_write_sqlite_engine(database_path)
+    try:
+        before = _snapshot_preexisting_tables(engine, _LEGACY_PRE_EXISTING_TABLES)
+
+        try:
+            from app import db_models  # noqa: F401 - registers all models on Base.metadata
+            from app.database import Base
+            from app.services.db_migrate import backfill_legacy_user_id_columns
+
+            Base.metadata.create_all(bind=engine)
+            backfill_legacy_user_id_columns(engine)
+            for table in Base.metadata.tables.values():
+                for index in table.indexes:
+                    index.create(bind=engine, checkfirst=True)
+        except Exception as exc:
+            print(f"Error while transforming {database_path}: {exc}")
+            print("Nothing was stamped. Restore from your backup if you want to abandon this attempt.")
+            return 1
+
+        problems = _verify_preexisting_data_unchanged(engine, before)
+        if problems:
+            print(f"Refusing to stamp {database_path} - existing data changed unexpectedly:")
+            for problem in problems:
+                print(f"  {problem}")
+            return 1
+
+        diff = diff_against_baseline(engine)
+        if diff:
+            print(f"Refusing to stamp {database_path} - schema still does not match the baseline:")
+            for entry in diff:
+                print(f"  {_format_diff_entry(entry)}")
+            return 1
+
+        stamp_head(engine)
+    finally:
+        engine.dispose()
+
+    print(f"Adoption complete: {database_path} is now stamped at 0001_baseline.")
+    return 0
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m app.services.schema_migration",
+        description=(
+            "Safe, explicit tools for checking and adopting an existing SQLite "
+            "database into Alembic. Every database path must be passed "
+            "explicitly - this never reads DATABASE_URL or defaults to tasks.db."
+        ),
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    check_parser = subparsers.add_parser(
+        "check", help="Read-only structural diff between a database and the baseline migration."
+    )
+    check_parser.add_argument(
+        "--database-path", required=True, type=Path, help="Path to the SQLite database file to inspect. Never written to."
+    )
+
+    adopt_parser = subparsers.add_parser(
+        "adopt-legacy",
+        help=(
+            "Adopt an existing pre-Alembic database: add missing user_id columns/"
+            "indexes, create conversation_states, verify, and stamp 0001_baseline."
+        ),
+    )
+    adopt_parser.add_argument(
+        "--database-path",
+        required=True,
+        type=Path,
+        help="Path to the SQLite database file to adopt. Modified in place - back it up first.",
+    )
+    adopt_parser.add_argument(
+        "--backup-path",
+        required=True,
+        type=Path,
+        help=(
+            "Path to a byte-identical backup of --database-path, taken immediately "
+            "before running this command. Adoption refuses to proceed unless this "
+            "file exists and its SHA-256 matches --database-path exactly."
+        ),
+    )
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
+
+    if args.command == "check":
+        return _cmd_check(args.database_path)
+    if args.command == "adopt-legacy":
+        return _cmd_adopt_legacy(args.database_path, args.backup_path)
+
+    parser.error(f"Unknown command: {args.command!r}")  # pragma: no cover - unreachable, subparsers are exhaustive
+    return 2
+
+
 if __name__ == "__main__":
-    # `python -m app.services.schema_migration` - the pre-stamp
-    # verification step (step 3) of the adoption procedures in
-    # README.md's "Database migrations (Alembic)" section. Reads
-    # DATABASE_URL exactly like the app itself (see app/database.py).
-    import sys
-
-    from app.database import engine as _app_engine
-
-    _diff = diff_against_baseline(_app_engine)
-    if _diff:
-        print("Schema does NOT match the baseline migration:")
-        for _change in _diff:
-            print(f"  {_change}")
-        sys.exit(1)
-    print("Schema matches the baseline migration exactly - safe to run `alembic stamp head`.")
+    sys.exit(main())

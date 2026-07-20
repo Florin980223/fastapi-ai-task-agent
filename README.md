@@ -81,65 +81,70 @@ from a normal dev/Docker/production startup anymore.
 
 ### Fresh database (new clone, or `tasks.db` deleted)
 
-```bash
+```powershell
 python -m alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
-### An existing `tasks.db` that already has `user_id` and `conversation_states`
+### An existing or legacy `tasks.db`: the `check` / `adopt-legacy` CLI
 
-Never blindly `stamp` — verify first, every time:
+`app/services/schema_migration.py` is also a small CLI
+(`python -m app.services.schema_migration --help`) for the two
+non-fresh cases below. Every command requires an explicit
+`--database-path` (and, for adoption, an explicit `--backup-path`) —
+it never reads `DATABASE_URL` and never defaults to `tasks.db`, so
+there's no way to accidentally target the wrong file.
 
-```bash
+**An existing `tasks.db` that already has `user_id` and `conversation_states`** —
+verify first, every time, never blindly `stamp`:
+
+```powershell
 # 1. Backup.
-cp tasks.db "tasks.db.backup-$(date +%Y%m%d%H%M%S)"
+Copy-Item tasks.db "tasks.db.backup-$(Get-Date -Format yyyyMMddHHmmss)"
 
-# 2. Verify the live schema exactly matches the baseline migration.
-#    (Not `alembic check` here - that command requires the database to
-#    already be stamped at head before it can even run. This uses the
-#    same structural comparison, without that precondition.)
-python -m app.services.schema_migration
-# -> "Schema matches the baseline migration exactly - safe to run `alembic stamp head`."
+# 2. Verify - read-only, writes nothing, exits 0 only if the schema
+#    already matches the baseline exactly.
+python -m app.services.schema_migration check --database-path tasks.db
 
 # 3. Adopt - no DDL, no data touched.
-alembic stamp head
+python -m alembic stamp head
 ```
 
-### A legacy, pre-authentication `tasks.db` (missing `user_id`, possibly missing `conversation_states`)
+**A legacy, pre-authentication `tasks.db`** (missing `user_id`,
+possibly missing `conversation_states` - `check` above would report a
+non-empty diff): `adopt-legacy` performs the full adoption in one
+command - it refuses to run without a backup that's byte-identical
+(SHA-256 verified) to the database it's about to transform, adds the
+missing `user_id` columns (backfilled with the `__unmigrated__`
+sentinel - see below) and their indexes, creates `conversation_states`
+with its own indexes/unique constraint, re-verifies every pre-existing
+row's pre-existing values are unchanged and the resulting schema
+exactly matches the baseline, and only stamps `0001_baseline` if both
+of those checks pass - it never runs `alembic upgrade head` against an
+existing database.
 
-Same shape as above, with one extra step to bring the schema fully
-current first, reusing the app's own existing, already-tested logic
-(safe no-ops if a piece is already present):
+```powershell
+# 1. Backup - adopt-legacy refuses to run without this, and refuses
+#    unless its SHA-256 matches tasks.db exactly.
+Copy-Item tasks.db "tasks.db.backup-$(Get-Date -Format yyyyMMddHHmmss)"
 
-```bash
-# 1. Backup.
-cp tasks.db "tasks.db.backup-$(date +%Y%m%d%H%M%S)"
+# 2. Adopt.
+python -m app.services.schema_migration adopt-legacy `
+    --database-path tasks.db `
+    --backup-path "tasks.db.backup-<the timestamp from step 1>"
 
-# 2. Bring the schema fully current: create.all() only ever adds
-#    missing tables; backfill_legacy_user_id_columns only ever adds a
-#    missing user_id column (backfilled with the __unmigrated__
-#    sentinel - see below); the index loop adds any index missing from
-#    a table that already existed (create_all() does not add indexes
-#    to tables it didn't create itself - this is the one gap
-#    backfill_legacy_user_id_columns leaves, since it only ever adds
-#    the column, not its accompanying index).
-python -c "
-from app.database import Base, engine
-from app import db_models
-from app.services.db_migrate import backfill_legacy_user_id_columns
-Base.metadata.create_all(bind=engine)
-backfill_legacy_user_id_columns(engine)
-for table in Base.metadata.tables.values():
-    for index in table.indexes:
-        index.create(bind=engine, checkfirst=True)
-"
-
-# 3. Verify - must report a clean match before stamping.
-python -m app.services.schema_migration
-
-# 4. Adopt - no DDL, no data touched.
-alembic stamp head
+# 3. Confirm.
+python -m app.services.schema_migration check --database-path tasks.db
 ```
+
+If `adopt-legacy` refuses for any reason (missing/mismatched backup,
+data that doesn't look unchanged after the transformation, or a
+schema that still doesn't match afterward), it prints exactly what it
+found, stamps nothing, and leaves the database in whatever state it
+was in — restore from the backup if you want to abandon the attempt
+rather than diagnose and re-run (each step it performs is itself
+idempotent, so simply re-running with a *fresh* backup of the current
+state is also safe).
 
 Rows created before authentication existed are preserved with
 `user_id = "__unmigrated__"` (a reserved sentinel that can never match
@@ -149,13 +154,13 @@ see `.env.example` for how to manually reclaim them).
 
 `app/services/db_migrate.py`'s `backfill_legacy_user_id_columns` is
 **not** converted into an Alembic migration and is **not** retired by
-this change — it runs first, as the one-time adoption helper in step 2
-above. Turning it into a migration would either duplicate this exact
-logic in two places, or force every not-yet-adopted database through
-Alembic before it can even reach a state Alembic recognizes, which is
-circular. It stays in the codebase for anyone who still has a
-never-yet-adopted pre-auth database; retiring it is a separate, later
-decision once none are believed to exist anymore.
+this change — `adopt-legacy` calls it directly, unmodified, as one step
+of its transformation. Turning it into a migration would either
+duplicate this exact logic in two places, or force every not-yet-adopted
+database through Alembic before it can even reach a state Alembic
+recognizes, which is circular. It stays in the codebase for anyone who
+still has a never-yet-adopted pre-auth database; retiring it is a
+separate, later decision once none are believed to exist anymore.
 
 ### Writing a new migration
 

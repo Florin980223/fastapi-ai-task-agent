@@ -141,7 +141,7 @@ def isolated_app_client():
         # itself, then stamps it at head, so init_db()'s verify-only
         # check finds a database it recognizes as current.
         Base.metadata.create_all(bind=engine)
-        schema_migration.stamp_head_for_tests(engine)
+        schema_migration.stamp_head(engine)
         app.dependency_overrides[get_db] = _override_get_db
         database.SessionLocal = eval_session_local
         # init_db() (run by the FastAPI lifespan below) uses this module-
