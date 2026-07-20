@@ -286,3 +286,67 @@ def test_reference_phrases_are_detected_case_insensitively(phrase):
 )
 def test_non_referential_messages_are_not_detected(message):
     assert mentions_contextual_reference(message) is False
+
+
+def test_last_task_id_survives_restart(restart_client_factory):
+    with restart_client_factory() as client:
+        created = _execute(client, "Add a task to buy milk")
+        conversation_id = created["conversation_id"]
+        task_id = created["result"]["id"]
+
+    # A brand new engine/Session/TestClient - simulating a fresh process
+    # against the same on-disk database - must still resolve "it" to the
+    # task remembered above.
+    with restart_client_factory() as client:
+        data = _execute(client, "Mark it as done", conversation_id=conversation_id)
+        assert data["needs_clarification"] is False
+        assert data["result"]["id"] == task_id
+        assert data["result"]["done"] is True
+
+
+def test_expired_context_is_not_used(client, new_db_session, test_user_id):
+    from datetime import datetime, timedelta, timezone
+    from uuid import UUID
+
+    from app.db_models import ConversationState
+
+    created = _execute(client, "Add a task to buy milk")
+    conversation_id = UUID(created["conversation_id"])
+
+    row = (
+        new_db_session.query(ConversationState)
+        .filter_by(user_id=test_user_id, conversation_id=conversation_id)
+        .one()
+    )
+    row.context_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    new_db_session.commit()
+
+    # The remembered task id has expired - "it" can no longer resolve,
+    # so this must ask for clarification instead of silently succeeding.
+    data = _execute(client, "Mark it as done", conversation_id=str(conversation_id))
+    assert data["needs_clarification"] is True
+    assert data["result"] is None
+
+
+def test_last_task_id_persistence_failure_does_not_undo_task_success(client, monkeypatch, caplog):
+    from app.services import conversation_memory
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated context persistence failure")
+
+    with monkeypatch.context() as m:
+        m.setattr(conversation_memory, "_get_or_create_row", boom)
+        with caplog.at_level("WARNING"):
+            data = _execute(client, "Add a task to buy milk")
+
+    # record_result is best-effort: its failure must never mask the
+    # already-committed task creation, only whether "it" resolves later.
+    assert data["selected_tool"] == "create_task"
+    assert data["result"]["title"] == "buy milk"
+    assert client.get("/tasks").json()[0]["title"] == "buy milk"
+    assert any("Failed to persist conversation context" in record.message for record in caplog.records)
+
+    # Without the remembered context (the patch above is no longer
+    # active here), "it" has nothing to resolve to.
+    followup = _execute(client, "Mark it as done", conversation_id=data["conversation_id"])
+    assert followup["needs_clarification"] is True

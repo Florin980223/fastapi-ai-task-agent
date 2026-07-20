@@ -40,6 +40,15 @@ back to guessing a single action.
 local SQLite file (`sqlite:///./tasks.db`) in the project root, created
 automatically the first time the app starts — no setup required.
 
+Pending clarifications, pending destructive-action confirmations, and
+remembered task context ("it"/"that one") are persisted in the same
+SQLite database (`ConversationState` in `app/db_models.py`), so they
+survive app restarts. Each has its own TTL, in seconds:
+`CONFIRMATION_TTL_SECONDS` (default `300`), `CLARIFICATION_TTL_SECONDS`
+(default `900`), and `CONTEXT_TTL_SECONDS` (default `7200`) — all must
+be positive integers, checked at startup. See "One worker, always"
+below for the current concurrency limits of this design.
+
 ## Run
 
 ```bash
@@ -229,17 +238,26 @@ Get-FileHash .\tasks.db -Algorithm SHA256   # compare before/after any docker co
 
 ### One worker, always
 
-The container always runs a single `uvicorn` worker
-(`--workers 1`), and this isn't a performance knob to tune up. Pending
+The container always runs a single `uvicorn` worker (`--workers 1`),
+and this isn't a performance knob to tune up yet. Pending
 clarifications, pending destructive-action confirmations, and
 remembered conversation context (`app/services/conversation_memory.py`)
-are held in plain Python dictionaries inside the running process —
-there's no Redis or other shared store yet. A second worker process
-would have its own, empty copy of that state, so a follow-up message
-("yes", a clarification answer, "3") could silently find nothing
-pending if it happened to land on a different worker than the message
-that started it. Don't raise `--workers` in the Dockerfile without
-first moving that state out of process memory.
+are persisted in a `ConversationState` table in the same SQLite
+database as tasks/traces — not in per-process memory — so this state
+now survives app restarts and container restarts (as long as the
+`agent_data` volume is kept; see "Data persistence" above).
+
+That said:
+
+- One worker is still the only configuration this feature has actually
+  been built and tested against. Running multiple `uvicorn` workers
+  against the same SQLite file introduces its own concurrency/locking
+  questions (SQLite serializes writers), and the atomic, single-use
+  confirmation-consumption logic in `conversation_memory.consume_confirmation`
+  has only been verified under a single worker process.
+- Multi-worker support is explicitly out of scope for this feature —
+  don't raise `--workers` in the Dockerfile without first validating
+  (and likely revisiting) that locking behavior.
 
 ### Using a local Ollama model instead of rule_based
 

@@ -1,6 +1,7 @@
 """Shared pytest fixtures for the test suite."""
 
 import os
+from contextlib import contextmanager
 
 # Make sure the production SQLite file is never touched, even by the
 # app's own startup (lifespan) hook - set this before app.main (and
@@ -24,7 +25,6 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.database as database
-import app.services.conversation_memory as conversation_memory
 from app.database import Base, get_db
 from app.main import app
 
@@ -130,32 +130,76 @@ def new_db_session():
         db.close()
 
 
+@pytest.fixture
+def restart_client_factory(tmp_path):
+    """Factory for simulating an application/container restart against
+    durable on-disk SQLite state (requirement: state must survive a new
+    TestClient/application lifecycle, a uvicorn restart, and a Docker
+    restart with the same volume).
+
+    Returns a context-manager function; each call opens a brand new
+    engine, a brand new sessionmaker, and a brand new TestClient - fully
+    independent Python objects with no shared engine/Session/connection
+    from any previous call - bound to the same on-disk file path (unlike
+    the `client` fixture's shared in-memory :memory: + StaticPool
+    engine, a real file is what makes "independent process, same disk
+    state" meaningful to prove). Entering the context also runs the
+    app's real lifespan (init_db(), i.e. Base.metadata.create_all()),
+    exactly as a real process restart would - which is a no-op against
+    tables that already exist on disk. Overrides get_db, database.
+    SessionLocal, and database.engine (mirroring evals/isolation.py's
+    isolated_app_client), and restores the previous overrides on exit.
+    """
+    db_path = tmp_path / "restart_test.db"
+
+    @contextmanager
+    def _client():
+        engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+        session_local = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+        def _override_get_db():
+            db = session_local()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        previous_override = app.dependency_overrides.get(get_db)
+        previous_session_local = database.SessionLocal
+        previous_engine = database.engine
+
+        app.dependency_overrides[get_db] = _override_get_db
+        database.SessionLocal = session_local
+        database.engine = engine
+
+        try:
+            with TestClient(app, headers={"X-API-Key": TEST_API_KEY}) as test_client:
+                yield test_client
+        finally:
+            if previous_override is not None:
+                app.dependency_overrides[get_db] = previous_override
+            else:
+                app.dependency_overrides.pop(get_db, None)
+            database.SessionLocal = previous_session_local
+            database.engine = previous_engine
+            engine.dispose()
+
+    return _client
+
+
 @pytest.fixture(autouse=True)
 def reset_tasks_db():
-    """Reset the SQLite task store before and after every test.
+    """Reset every table (tasks, agent_runs/steps, conversation_states)
+    before and after every test.
 
     Dropping and recreating the tables gives each test an empty
     database and resets the autoincrement id sequence, replacing the
     old tasks_db.clear() / _next_id reset used by the in-memory store.
+    This also resets conversation_memory's ConversationState rows, since
+    that table is registered on the same Base - there is no separate
+    reset needed for pending clarifications/confirmations/last_task_id.
     """
     Base.metadata.create_all(bind=test_engine)
     yield
     Base.metadata.drop_all(bind=test_engine)
 
-
-@pytest.fixture(autouse=True)
-def reset_conversation_memory():
-    """Reset pending-clarification, pending-confirmation, and
-    remembered-context memory before and after every test.
-
-    conversation_memory._pending, _pending_confirmation, and
-    _last_task_id are module-level globals, same reason as
-    reset_tasks_db above.
-    """
-    conversation_memory._pending.clear()
-    conversation_memory._pending_confirmation.clear()
-    conversation_memory._last_task_id.clear()
-    yield
-    conversation_memory._pending.clear()
-    conversation_memory._pending_confirmation.clear()
-    conversation_memory._last_task_id.clear()

@@ -6,6 +6,7 @@ developer) can discover what actions are available without reading
 the source code.
 """
 
+import logging
 import time
 import uuid
 from datetime import datetime, timezone
@@ -29,6 +30,8 @@ from app.services.auth import AuthenticatedUser, get_current_user
 from app.services.conversation_memory import PendingClarification, PendingConfirmation
 from app.services.tool_decision import ToolDecision
 from app.services.tool_registry import AVAILABLE_TOOLS
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -83,11 +86,11 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db), current_user
     message = request.message
 
     try:
-        pending_confirmation = conversation_memory.get_confirmation(user_id, conversation_id)
+        pending_confirmation = conversation_memory.peek_confirmation(db, user_id, conversation_id)
 
         if pending_confirmation is not None:
             if clarification.is_confirmation_cancellation(message):
-                conversation_memory.clear_confirmation(user_id, conversation_id)
+                conversation_memory.clear_confirmation(db, user_id, conversation_id)
                 response = ExecuteResponse(
                     run_id=run_id,
                     conversation_id=conversation_id,
@@ -125,44 +128,52 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db), current_user
                 )
                 return response
 
-            # Confirmed - revalidate the stored decision immediately before
-            # executing it, then run it exactly like any other complete
-            # decision below.
-            conversation_memory.clear_confirmation(user_id, conversation_id)
-            decision = ToolDecision(
-                selected_tool=pending_confirmation.selected_tool,
-                arguments=pending_confirmation.arguments,
-                reason=pending_confirmation.reason,
-            )
-            tool_schemas.validate_tool_call(decision.selected_tool, decision.arguments)
-            step_started = time.monotonic()
-            result = agent_service.execute_tool(decision, db, user_id)
-            single_step_duration_ms = int((time.monotonic() - step_started) * 1000)
-            single_step_arguments = decision.arguments
-            conversation_memory.record_result(user_id, conversation_id, decision.selected_tool, result)
-            final_answer = agent_service.generate_final_answer(decision.selected_tool, result)
-            response = ExecuteResponse(
-                run_id=run_id,
-                conversation_id=conversation_id,
-                message=message,
-                selected_tool=decision.selected_tool,
-                result=result,
-                reason=decision.reason,
-                final_answer=final_answer,
-                needs_clarification=False,
-                clarification_question=None,
-                needs_confirmation=False,
-                confirmation_question=None,
-                is_multi_step=False,
-                steps=[],
-            )
-            return response
+            # A clear "yes" - atomically consume the confirmation before
+            # executing anything, so a duplicate/concurrent "yes" can
+            # never execute the destructive tool twice (see
+            # conversation_memory.consume_confirmation). Never execute
+            # based on the pending_confirmation peeked above - only the
+            # freshly consumed value.
+            consumed = conversation_memory.consume_confirmation(db, user_id, conversation_id)
+            if consumed is not None:
+                decision = ToolDecision(
+                    selected_tool=consumed.selected_tool,
+                    arguments=consumed.arguments,
+                    reason=consumed.reason,
+                )
+                tool_schemas.validate_tool_call(decision.selected_tool, decision.arguments)
+                step_started = time.monotonic()
+                result = agent_service.execute_tool(decision, db, user_id)
+                single_step_duration_ms = int((time.monotonic() - step_started) * 1000)
+                single_step_arguments = decision.arguments
+                conversation_memory.record_result(user_id, conversation_id, decision.selected_tool, result)
+                final_answer = agent_service.generate_final_answer(decision.selected_tool, result)
+                response = ExecuteResponse(
+                    run_id=run_id,
+                    conversation_id=conversation_id,
+                    message=message,
+                    selected_tool=decision.selected_tool,
+                    result=result,
+                    reason=decision.reason,
+                    final_answer=final_answer,
+                    needs_clarification=False,
+                    clarification_question=None,
+                    needs_confirmation=False,
+                    confirmation_question=None,
+                    is_multi_step=False,
+                    steps=[],
+                )
+                return response
+            # else: the confirmation expired, or a concurrent/duplicate
+            # "yes" already consumed it, between the peek above and this
+            # consume attempt. Fall through and treat this message as an
+            # ordinary new one - never execute anything on a stale peek.
 
-        pending = conversation_memory.get(user_id, conversation_id)
+        pending = conversation_memory.get(db, user_id, conversation_id)
 
         if pending is not None:
             if clarification.is_cancellation(message):
-                conversation_memory.clear(user_id, conversation_id)
+                conversation_memory.clear(db, user_id, conversation_id)
                 response = ExecuteResponse(
                     run_id=run_id,
                     conversation_id=conversation_id,
@@ -236,22 +247,37 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db), current_user
         # Fill in a missing task_id from remembered context, but only if the
         # message explicitly refers back to a prior task ("it", "that task").
         # A generic incomplete request still asks for clarification below.
-        last_task_id = conversation_memory.get_last_task_id(user_id, conversation_id)
+        last_task_id = conversation_memory.get_last_task_id(db, user_id, conversation_id)
         clarification.resolve_remembered_task_id(decision, last_task_id, message)
 
         missing = clarification.missing_arguments(decision)
         if missing:
             question = clarification.build_clarification_question(decision.selected_tool, missing)
-            conversation_memory.set(
-                user_id,
-                conversation_id,
-                PendingClarification(
-                    selected_tool=decision.selected_tool,
-                    arguments=decision.arguments,
-                    reason=decision.reason,
-                    missing=missing,
-                ),
-            )
+            try:
+                conversation_memory.set(
+                    db,
+                    user_id,
+                    conversation_id,
+                    PendingClarification(
+                        selected_tool=decision.selected_tool,
+                        arguments=decision.arguments,
+                        reason=decision.reason,
+                        missing=missing,
+                    ),
+                )
+            except Exception as exc:
+                # Never claim needs_clarification=true unless the pending
+                # state actually made it to disk - see
+                # conversation_memory.py's module docstring. Never expose
+                # db details/secrets, only a generic message; the real
+                # exception is logged server-side only.
+                logger.warning(
+                    "Failed to persist pending clarification for user_id=%s conversation_id=%s: %s",
+                    user_id,
+                    conversation_id,
+                    exc,
+                )
+                raise HTTPException(status_code=500, detail="Failed to save conversation state. Please try again.") from exc
             response = ExecuteResponse(
                 run_id=run_id,
                 conversation_id=conversation_id,
@@ -278,22 +304,41 @@ def execute(request: ExecuteRequest, db: Session = Depends(get_db), current_user
         # The decision is fully resolved now (no missing arguments), whether
         # it goes on to execute immediately or wait for confirmation below -
         # either way, any pending clarification for this conversation is done.
-        conversation_memory.clear(user_id, conversation_id)
+        conversation_memory.clear(db, user_id, conversation_id)
 
         # Destructive tools don't execute yet - park the decision and ask
         # the user to explicitly confirm it first.
         if clarification.requires_confirmation(decision.selected_tool):
             question = clarification.build_confirmation_question(decision)
-            conversation_memory.set_confirmation(
-                user_id,
-                conversation_id,
-                PendingConfirmation(
-                    selected_tool=decision.selected_tool,
-                    arguments=decision.arguments,
-                    reason=decision.reason,
-                    question=question,
-                ),
-            )
+            try:
+                conversation_memory.set_confirmation(
+                    db,
+                    user_id,
+                    conversation_id,
+                    PendingConfirmation(
+                        selected_tool=decision.selected_tool,
+                        arguments=decision.arguments,
+                        reason=decision.reason,
+                        question=question,
+                    ),
+                )
+            except Exception as exc:
+                # Never claim needs_confirmation=true unless the pending
+                # state actually made it to disk - a lost confirmation
+                # would mean a later "yes" falls through to an ordinary
+                # message instead of executing the destructive tool, but
+                # a *falsely claimed* pending confirmation would be worse
+                # (the user thinks they still need to confirm something
+                # that was never actually parked). Never expose db
+                # details/secrets, only a generic message; the real
+                # exception is logged server-side only.
+                logger.warning(
+                    "Failed to persist pending confirmation for user_id=%s conversation_id=%s: %s",
+                    user_id,
+                    conversation_id,
+                    exc,
+                )
+                raise HTTPException(status_code=500, detail="Failed to save conversation state. Please try again.") from exc
             response = ExecuteResponse(
                 run_id=run_id,
                 conversation_id=conversation_id,

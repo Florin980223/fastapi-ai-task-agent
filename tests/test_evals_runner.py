@@ -264,6 +264,29 @@ def test_state_resets_between_cases():
         assert created["title"] == "second"
 
 
+def test_conversation_state_resets_between_cases():
+    from app.db_models import ConversationState
+    from sqlalchemy.orm import sessionmaker
+
+    with isolated_app_client() as env:
+        env.client.post("/agent/execute", json={"message": "Delete a task"})
+
+        session_local = sessionmaker(bind=env.engine)
+        db = session_local()
+        try:
+            assert db.query(ConversationState).count() == 1
+        finally:
+            db.close()
+
+        reset_state(env.engine)
+
+        db = session_local()
+        try:
+            assert db.query(ConversationState).count() == 0
+        finally:
+            db.close()
+
+
 def test_isolated_database_is_a_temp_file_not_the_repo_database():
     with isolated_app_client() as env:
         db_path = str(env.engine.url.database)

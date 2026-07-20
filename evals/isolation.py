@@ -38,7 +38,6 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
 import app.database as database
-import app.services.conversation_memory as conversation_memory
 from app import config
 from app.database import Base, get_db
 from app.main import app
@@ -76,16 +75,16 @@ def mock_weather_service():
 
 def reset_state(engine: Engine) -> None:
     """Full reset between every case: drop+recreate all tables (tasks,
-    agent_runs, agent_run_steps - including autoincrement ids, which is
-    what makes setup_tasks ids deterministic), and clear conversation
-    memory's pending-clarification / pending-confirmation / remembered-
-    task-id state.
+    agent_runs, agent_run_steps, conversation_states - including
+    autoincrement ids, which is what makes setup_tasks ids
+    deterministic). conversation_memory's pending-clarification /
+    pending-confirmation / remembered-task-id state now lives in the
+    conversation_states table, registered on the same Base, so dropping
+    and recreating all tables already clears it too - no separate reset
+    needed.
     """
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
-    conversation_memory._pending.clear()
-    conversation_memory._pending_confirmation.clear()
-    conversation_memory._last_task_id.clear()
 
 
 @dataclass

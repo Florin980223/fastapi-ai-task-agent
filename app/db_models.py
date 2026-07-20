@@ -8,7 +8,7 @@ API accepts/returns.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Uuid
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -75,3 +75,53 @@ class AgentRunStep(Base):
     result_summary: Mapped[str | None] = mapped_column(String, nullable=True)
 
     run: Mapped["AgentRun"] = relationship(back_populates="steps")
+
+
+class ConversationState(Base):
+    """Durable replacement for conversation_memory's three in-process
+    dicts - one row per (user_id, conversation_id), holding three
+    independent, nullable "slots": a pending clarification, a pending
+    destructive-action confirmation, and a remembered last_task_id.
+
+    A row can have any subset of the three slots populated (a
+    clarification and a confirmation are never both pending at once in
+    practice, but nothing here enforces that - see conversation_memory.py
+    for the actual state machine). Each slot has its own *_expires_at
+    timestamp; an expired slot must be treated as absent by every reader
+    (see conversation_memory.py's get/peek functions), never as valid
+    just because the row still physically exists.
+
+    Reused across restarts because it's just another table in the same
+    SQLite database as Task/AgentRun - no separate engine, no separate
+    volume.
+    """
+
+    __tablename__ = "conversation_states"
+    __table_args__ = (
+        UniqueConstraint("user_id", "conversation_id", name="uq_conversation_states_user_conversation"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, index=True)
+
+    # Pending clarification slot (mirrors conversation_memory.PendingClarification).
+    clarification_tool: Mapped[str | None] = mapped_column(String, nullable=True)
+    clarification_arguments_json: Mapped[str | None] = mapped_column(String, nullable=True)
+    clarification_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    clarification_missing_json: Mapped[str | None] = mapped_column(String, nullable=True)
+    clarification_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Pending confirmation slot (mirrors conversation_memory.PendingConfirmation).
+    confirmation_tool: Mapped[str | None] = mapped_column(String, nullable=True)
+    confirmation_arguments_json: Mapped[str | None] = mapped_column(String, nullable=True)
+    confirmation_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    confirmation_question: Mapped[str | None] = mapped_column(String, nullable=True)
+    confirmation_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Remembered context slot ("it"/"that one" resolution).
+    last_task_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    context_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

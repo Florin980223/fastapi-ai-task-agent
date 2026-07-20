@@ -215,3 +215,62 @@ def test_normal_request_without_pending_state_still_works(client):
     assert data["selected_tool"] == "create_task"
     assert data["result"]["title"] == "buy milk"
     assert data["final_answer"] == 'Created task #1: "buy milk".'
+
+
+def test_clarification_survives_restart(restart_client_factory):
+    with restart_client_factory() as client:
+        created = _execute(client, "Add a task to buy milk")
+        task_id = created["result"]["id"]
+        asked = _execute(client, "Delete a task")
+        conversation_id = asked["conversation_id"]
+        assert asked["needs_clarification"] is True
+
+    # A brand new engine/Session/TestClient - simulating a fresh process
+    # against the same on-disk database - must still be able to resume
+    # this pending clarification.
+    with restart_client_factory() as client:
+        answered = _execute(client, str(task_id), conversation_id=conversation_id)
+        assert answered["needs_clarification"] is False
+        assert answered["needs_confirmation"] is True
+        assert answered["selected_tool"] == "delete_task"
+
+
+def test_expired_clarification_is_treated_as_absent(client, new_db_session, test_user_id):
+    from datetime import datetime, timedelta, timezone
+    from uuid import UUID
+
+    from app.db_models import ConversationState
+
+    asked = _execute(client, "Delete a task")
+    conversation_id = UUID(asked["conversation_id"])
+
+    row = (
+        new_db_session.query(ConversationState)
+        .filter_by(user_id=test_user_id, conversation_id=conversation_id)
+        .one()
+    )
+    row.clarification_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    new_db_session.commit()
+
+    # "3" would normally be merged into the expired clarification as the
+    # missing task id - instead it must be treated as a fresh, unrelated
+    # message with nothing pending.
+    reply = _execute(client, "3", conversation_id=str(conversation_id))
+    assert reply["needs_clarification"] is False
+    assert reply["selected_tool"] is None
+
+
+def test_clarification_persistence_failure_returns_safe_error(client, monkeypatch):
+    from app.services import conversation_memory
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("db explosion containing a fake secret sauce")
+
+    monkeypatch.setattr(conversation_memory, "set", boom)
+
+    response = client.post("/agent/execute", json={"message": "Delete a task"})
+
+    assert response.status_code == 500
+    body = response.json()
+    assert "secret sauce" not in str(body)
+    assert body["detail"] == "Failed to save conversation state. Please try again."

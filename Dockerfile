@@ -67,11 +67,13 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
 # for a clean FastAPI lifespan shutdown instead of a forced SIGKILL
 # after the grace period. Exactly one worker, always: conversation/
 # clarification/confirmation state (app/services/conversation_memory.py)
-# lives in per-process, module-level Python dicts with no shared store
-# (no Redis etc. at this stage) - a second worker process would have
-# its own, empty copy of that state, so a user's follow-up reply
-# ("yes", a clarification answer, "3") would silently find nothing
-# pending whenever it happened to land on a different worker than the
-# message that started it. Do not raise --workers without first moving
-# that state out of process memory.
+# is persisted in the same SQLite database as tasks/traces (the
+# ConversationState table), so it now survives container restarts on
+# the same volume - but one worker is still the only configuration this
+# has been built and tested against. Multiple uvicorn workers sharing
+# one SQLite file raises its own locking/concurrency questions that
+# haven't been validated here, and the atomic, single-use confirmation-
+# consumption logic (conversation_memory.consume_confirmation) has only
+# been verified under a single worker process. Do not raise --workers
+# without first validating that.
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

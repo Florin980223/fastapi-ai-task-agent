@@ -222,7 +222,7 @@ def test_pending_confirmation_is_isolated_between_users(client, other_user_heade
     assert client.get("/tasks").json() == []
 
 
-def test_non_destructive_tools_still_execute_immediately(client, monkeypatch):
+def test_non_destructive_tools_still_execute_immediately(client, monkeypatch, new_db_session, test_user_id):
     from app.services import weather_service
 
     def fake_get_weather_for_city(city):
@@ -257,7 +257,132 @@ def test_non_destructive_tools_still_execute_immediately(client, monkeypatch):
     assert done_data["needs_confirmation"] is False
     assert done_data["result"]["done"] is True
 
-    # None of the above should have left a pending confirmation behind.
+    # None of the above should have left a pending confirmation behind,
+    # for this user, in the durable ConversationState table.
+    from app.db_models import ConversationState
+
+    rows = new_db_session.query(ConversationState).filter_by(user_id=test_user_id).all()
+    assert all(row.confirmation_tool is None for row in rows)
+
+
+def test_confirmation_survives_restart(restart_client_factory):
+    with restart_client_factory() as client:
+        created = _execute(client, "Add a task to buy milk")
+        task_id = created["result"]["id"]
+        asked = _execute(client, f"Delete task {task_id}")
+        conversation_id = asked["conversation_id"]
+        assert asked["needs_confirmation"] is True
+
+    # A brand new engine/Session/TestClient - simulating a fresh process
+    # against the same on-disk database - must still see the pending
+    # confirmation parked above and execute it.
+    with restart_client_factory() as client:
+        confirmed = _execute(client, "yes", conversation_id=conversation_id)
+        assert confirmed["result"] == {"status": "deleted", "task_id": task_id}
+        assert client.get("/tasks").json() == []
+
+
+def test_second_yes_after_confirmation_executes_nothing(client):
+    created = _execute(client, "Add a task to buy milk")
+    task_id = created["result"]["id"]
+    asked = _execute(client, f"Delete task {task_id}")
+    conversation_id = asked["conversation_id"]
+
+    first = _execute(client, "yes", conversation_id=conversation_id)
+    assert first["result"] == {"status": "deleted", "task_id": task_id}
+
+    # The confirmation was consumed by the first "yes" - a second one on
+    # the same conversation must find nothing pending and must not
+    # attempt delete_task again (it already doesn't exist).
+    second = _execute(client, "yes", conversation_id=conversation_id)
+    assert second["needs_confirmation"] is False
+    assert second["selected_tool"] != "delete_task"
+
+
+def test_concurrent_consume_confirmation_only_succeeds_once(client, new_db_session, test_user_id):
+    import app.database as database
+    from uuid import UUID
+
     from app.services import conversation_memory
 
-    assert conversation_memory._pending_confirmation == {}
+    created = _execute(client, "Add a task to buy milk")
+    task_id = created["result"]["id"]
+    asked = _execute(client, f"Delete task {task_id}")
+    conversation_id = UUID(asked["conversation_id"])
+
+    # Two independent Sessions, standing in for two concurrent HTTP
+    # requests each with their own request-scoped db - racing to consume
+    # the same pending confirmation.
+    second_session = database.SessionLocal()
+    try:
+        first = conversation_memory.consume_confirmation(new_db_session, test_user_id, conversation_id)
+        second = conversation_memory.consume_confirmation(second_session, test_user_id, conversation_id)
+    finally:
+        second_session.close()
+
+    assert first is not None
+    assert first.selected_tool == "delete_task"
+    assert second is None
+
+
+def test_expired_confirmation_cannot_delete(client, new_db_session, test_user_id):
+    from datetime import datetime, timedelta, timezone
+    from uuid import UUID
+
+    from app.db_models import ConversationState
+
+    created = _execute(client, "Add a task to buy milk")
+    task_id = created["result"]["id"]
+    asked = _execute(client, f"Delete task {task_id}")
+    conversation_id = UUID(asked["conversation_id"])
+
+    row = (
+        new_db_session.query(ConversationState)
+        .filter_by(user_id=test_user_id, conversation_id=conversation_id)
+        .one()
+    )
+    row.confirmation_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    new_db_session.commit()
+
+    confirmed = _execute(client, "yes", conversation_id=str(conversation_id))
+    assert confirmed["needs_confirmation"] is False
+    assert confirmed["selected_tool"] != "delete_task"
+    assert any(task["id"] == task_id for task in client.get("/tasks").json())
+
+
+def test_confirmation_persistence_failure_returns_safe_error(client, monkeypatch):
+    from app.services import conversation_memory
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("db explosion containing a fake secret sauce")
+
+    monkeypatch.setattr(conversation_memory, "set_confirmation", boom)
+
+    created = _execute(client, "Add a task to buy milk")
+    task_id = created["result"]["id"]
+
+    response = client.post("/agent/execute", json={"message": f"Delete task {task_id}"})
+
+    assert response.status_code == 500
+    body = response.json()
+    assert "secret sauce" not in str(body)
+    assert body["detail"] == "Failed to save conversation state. Please try again."
+    # Nothing was queued - the task is untouched.
+    assert any(task["id"] == task_id for task in client.get("/tasks").json())
+
+
+def test_raw_api_key_never_appears_in_conversation_state(client, new_db_session, test_api_key):
+    from app.db_models import ConversationState
+
+    created = _execute(client, "Add a task to buy milk")
+    task_id = created["result"]["id"]
+    asked = _execute(client, "Delete a task")
+    conversation_id = asked["conversation_id"]
+    _execute(client, str(task_id), conversation_id=conversation_id)
+
+    rows = new_db_session.query(ConversationState).all()
+    assert rows
+    for row in rows:
+        for column in ConversationState.__table__.columns:
+            value = getattr(row, column.name)
+            assert test_api_key not in str(value)

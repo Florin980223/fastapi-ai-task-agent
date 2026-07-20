@@ -119,6 +119,34 @@ def test_confirmation_followup_creates_new_run_same_conversation(client):
     assert detail["steps"][0]["tool"] == "delete_task"
 
 
+def test_expired_confirmation_followup_records_no_destructive_step(client, new_db_session, test_user_id):
+    from datetime import datetime, timedelta, timezone
+    from uuid import UUID
+
+    from app.db_models import ConversationState
+
+    created = _execute(client, "Add a task to buy milk")
+    task_id = created["result"]["id"]
+    asked = _execute(client, f"Delete task {task_id}")
+    conversation_id = UUID(asked["conversation_id"])
+
+    row = (
+        new_db_session.query(ConversationState)
+        .filter_by(user_id=test_user_id, conversation_id=conversation_id)
+        .one()
+    )
+    row.confirmation_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    new_db_session.commit()
+
+    confirmed = _execute(client, "yes", conversation_id=str(conversation_id))
+    assert confirmed["run_id"] != asked["run_id"]
+
+    detail = client.get(f"/agent/runs/{confirmed['run_id']}").json()
+    assert detail["conversation_id"] == str(conversation_id)
+    assert all(step["tool"] != "delete_task" for step in detail["steps"])
+    assert any(task["id"] == task_id for task in client.get("/tasks").json())
+
+
 def test_cancellation_is_stored(client):
     created = _execute(client, "Add a task to buy milk")
     task_id = created["result"]["id"]

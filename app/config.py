@@ -109,3 +109,44 @@ def _parse_api_keys(raw: str) -> dict[str, str]:
 # present a key that appears here. Raw key values are never logged or
 # persisted anywhere - see app/services/auth.py.
 API_KEYS: dict[str, str] = _parse_api_keys(os.environ.get("API_KEYS", ""))
+
+
+class ConversationStateConfigError(RuntimeError):
+    """Raised when a conversation-state TTL env var is set but isn't a
+    positive integer. Always fails fast at import time, same reasoning
+    as ApiKeyConfigError - a bad TTL should never silently fall back to
+    some other value and start serving requests.
+    """
+
+
+def _parse_positive_int_seconds(name: str, raw: str) -> int:
+    raw = raw.strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ConversationStateConfigError(f"{name} must be a positive integer number of seconds, got {raw!r}.")
+    if value <= 0:
+        raise ConversationStateConfigError(f"{name} must be a positive integer number of seconds, got {value}.")
+    return value
+
+
+# How long a pending destructive-action confirmation (e.g. delete_task)
+# stays valid before a "yes" reply is treated as stale and ignored.
+# Shortest of the three TTLs, since it gates an irreversible action.
+CONFIRMATION_TTL_SECONDS = _parse_positive_int_seconds(
+    "CONFIRMATION_TTL_SECONDS", os.environ.get("CONFIRMATION_TTL_SECONDS", "300")
+)
+
+# How long a pending clarification (a tool decision missing a required
+# argument) stays valid before a follow-up reply is treated as an
+# unrelated new message instead of an answer to it.
+CLARIFICATION_TTL_SECONDS = _parse_positive_int_seconds(
+    "CLARIFICATION_TTL_SECONDS", os.environ.get("CLARIFICATION_TTL_SECONDS", "900")
+)
+
+# How long a remembered last_task_id (for resolving "it"/"that one")
+# stays valid. Longest of the three - purely a UX convenience, not
+# safety-critical, so it's worth remembering across a longer gap.
+CONTEXT_TTL_SECONDS = _parse_positive_int_seconds(
+    "CONTEXT_TTL_SECONDS", os.environ.get("CONTEXT_TTL_SECONDS", "7200")
+)
