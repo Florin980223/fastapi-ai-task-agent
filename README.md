@@ -190,7 +190,8 @@ similarly irreversible, in which case block-and-document the same way.
 uvicorn app.main:app --reload
 ```
 
-Then open http://127.0.0.1:8000/docs for the interactive API docs (Swagger UI).
+Then open http://127.0.0.1:8000/docs for the interactive API docs (Swagger UI),
+or http://127.0.0.1:8000/ for the browser demo UI — see "Web UI" below.
 
 ## Endpoints
 
@@ -199,6 +200,65 @@ Then open http://127.0.0.1:8000/docs for the interactive API docs (Swagger UI).
 - `POST /tasks` — create a task. Body: `{"title": "Buy milk", "description": "2 liters"}`
 - `PATCH /tasks/{task_id}/done` — mark a task as done.
 - `DELETE /tasks/{task_id}` — delete a task.
+
+## Web UI
+
+A small, dependency-free browser UI for demoing the task list and the agent
+without needing `curl`/Swagger — plain HTML, CSS, and vanilla JavaScript
+(ES modules, no framework, no build step, no CDN), served directly by this
+same FastAPI app from `app/static/`. It doesn't add, hide, or reimplement
+any behavior: every action calls one of the existing endpoints listed
+above and in "Endpoints"/"Observability", and every rule (auth, per-user
+isolation, clarification/confirmation flows) is enforced by the backend
+exactly as it already was — the UI only ever reflects what a response
+says.
+
+**Starting it:**
+
+```bash
+uvicorn app.main:app --reload
+```
+
+Open **http://127.0.0.1:8000/** (or, via Docker, **http://localhost:8000/**
+after `docker compose up -d` — see "Docker" below). `/docs`, `/redoc`, and
+every existing endpoint keep working exactly as before; the UI is mounted
+last and only ever serves a path nothing else claims.
+
+**Entering your API key:** on first load you'll see an "Enter your API key"
+screen — paste one of your configured `API_KEYS` values (e.g. one of the
+`devkey-alice`/`devkey-bob` pair from `.env.example`/`.env.docker.example`).
+The key is sent as the normal `X-API-Key` header on every request and is
+stored **only** in this browser tab's `sessionStorage` — never in
+`localStorage`, never written to disk, never sent anywhere but this server.
+A "Clear API key" button in the header removes it and returns to the entry
+screen at any time; it also disappears automatically when you close the tab.
+
+**Local-demo security limitations** (by design, for a local/portfolio demo
+— not a production multi-tenant deployment):
+
+- `sessionStorage` is readable by any script running on the page. The
+  strict `Content-Security-Policy` this UI is served under (no
+  `'unsafe-inline'`, no `'unsafe-eval'`, no external/CDN source — see
+  "Security notes for this setup") is the mitigation, but this remains a
+  local-demo pattern, not a hardened production auth design.
+- No CSRF exposure is introduced by this UI: authentication is a custom
+  header sent by JavaScript, never an ambient cookie, so classic CSRF
+  doesn't apply — but a successful XSS would still be able to read the
+  stored key for as long as the tab stays open.
+- `/docs`/`/redoc` still load Swagger UI's/ReDoc's own JS/CSS from a CDN —
+  unrelated pre-existing FastAPI behavior, explicitly out of scope here,
+  and the only exemption from this UI's own strict CSP.
+- Same single-worker/in-memory rate-limiter constraints as always — see
+  "One worker, always" below; this UI doesn't change them.
+
+**Demo workflow:** add a task, mark it done, then switch to the Agent tab
+and try something ambiguous like "create a task" — answer its clarifying
+question, then try "delete task 1" and confirm it when asked. Switch to
+Run History to see both requests recorded with their status, selected tool,
+and step trace.
+
+**Screenshots:** _(placeholder — add a screenshot of each of the three
+tabs — Tasks, Agent, Run History — here once available)_
 
 ## Observability
 
@@ -602,6 +662,15 @@ recreates the container).
   single-process request-rate guard does exist (see "Reliability &
   request handling" above) — it's a basic abuse/accident guard, not a
   substitute for real perimeter security.
+- Every response (API and the Web UI alike) carries `X-Content-Type-Options:
+  nosniff`, `Referrer-Policy: no-referrer`, and `X-Frame-Options: DENY`
+  (`app/middleware.py`'s `SecurityHeadersMiddleware`). A strict
+  `Content-Security-Policy` (`default-src 'self'` and friends — no
+  `'unsafe-inline'`, no `'unsafe-eval'`, no external/CDN source) is also
+  added everywhere **except** `/docs`, `/redoc`, and `/openapi.json`,
+  which are exempted only because Swagger UI/ReDoc's own default HTML
+  loads its JS/CSS from a CDN — those three keep working exactly as
+  before.
 
 ## Continuous Integration (CI)
 

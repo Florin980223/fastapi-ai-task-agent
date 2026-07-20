@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FastAPI AI Task Agent — Demo</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <header class="app-header">
+    <h1>FastAPI AI Task Agent</h1>
+    <div class="key-status" id="keyStatus">
+      <span id="keyStatusText">Not signed in</span>
+      <button type="button" id="clearKeyBtn" class="btn btn-secondary" hidden>Clear API key</button>
+    </div>
+  </header>
+
+  <section id="apiKeyGate" class="api-key-gate" aria-labelledby="apiKeyGateHeading">
+    <h2 id="apiKeyGateHeading">Enter your API key</h2>
+    <p>
+      This demo talks to the real backend API. Your key is sent only as the
+      <code>X-API-Key</code> header on requests to this server, and is stored
+      only in this browser tab's <code>sessionStorage</code> — never in
+      <code>localStorage</code>, never on disk, and it disappears when you
+      close this tab or click "Clear API key".
+    </p>
+    <form id="apiKeyForm" novalidate>
+      <label for="apiKeyInput">API key (X-API-Key)</label>
+      <input
+        id="apiKeyInput"
+        name="apiKey"
+        type="password"
+        autocomplete="off"
+        spellcheck="false"
+        required
+      >
+      <button type="submit" class="btn btn-primary">Save key</button>
+    </form>
+    <p id="apiKeyGateError" class="field-error" role="alert" hidden></p>
+  </section>
+
+  <div id="appShell" hidden>
+    <nav class="tabs" role="tablist" aria-label="Sections">
+      <button type="button" role="tab" id="tab-tasks" aria-controls="panel-tasks" aria-selected="true" tabindex="0">Tasks</button>
+      <button type="button" role="tab" id="tab-agent" aria-controls="panel-agent" aria-selected="false" tabindex="-1">Agent</button>
+      <button type="button" role="tab" id="tab-history" aria-controls="panel-history" aria-selected="false" tabindex="-1">Run History</button>
+    </nav>
+
+    <main id="main">
+      <!-- ===================== Tasks panel ===================== -->
+      <section id="panel-tasks" class="panel" role="tabpanel" aria-labelledby="tab-tasks" tabindex="0">
+        <h2>Tasks</h2>
+
+        <form id="taskCreateForm" class="task-form">
+          <div class="field">
+            <label for="taskTitleInput">Title</label>
+            <input id="taskTitleInput" name="title" type="text" maxlength="200" required>
+          </div>
+          <div class="field">
+            <label for="taskDescriptionInput">Description (optional)</label>
+            <textarea id="taskDescriptionInput" name="description" maxlength="2000" rows="2"></textarea>
+          </div>
+          <button type="submit" class="btn btn-primary" id="taskCreateSubmit">Add task</button>
+        </form>
+
+        <div id="tasksStatus" class="panel-status" aria-live="polite"></div>
+        <ul id="taskList" class="task-list" aria-label="Task list"></ul>
+      </section>
+
+      <!-- ===================== Agent panel ===================== -->
+      <section id="panel-agent" class="panel" role="tabpanel" aria-labelledby="tab-agent" tabindex="0" hidden>
+        <h2>Ask the agent</h2>
+        <p class="hint" id="agentHint">
+          Describe what you want in plain language, e.g. "Add a task to buy milk" or
+          "Delete task 3".
+        </p>
+
+        <form id="agentForm" class="agent-form">
+          <div class="field">
+            <label for="agentMessageInput" id="agentMessageLabel">Message</label>
+            <input id="agentMessageInput" name="message" type="text" maxlength="4000" required autocomplete="off">
+          </div>
+          <div class="agent-form-actions">
+            <button type="submit" class="btn btn-primary" id="agentSubmit">Send</button>
+            <button type="button" class="btn btn-secondary" id="agentNewConversationBtn">New conversation</button>
+          </div>
+        </form>
+
+        <div id="agentStatus" class="panel-status" aria-live="polite"></div>
+        <div id="agentResult" class="agent-result"></div>
+      </section>
+
+      <!-- ===================== History panel ===================== -->
+      <section id="panel-history" class="panel" role="tabpanel" aria-labelledby="tab-history" tabindex="0" hidden>
+        <h2>Recent agent runs</h2>
+        <button type="button" class="btn btn-secondary" id="historyRefreshBtn">Refresh</button>
+
+        <div id="historyStatus" class="panel-status" aria-live="polite"></div>
+        <div class="history-layout">
+          <ul id="runList" class="run-list" aria-label="Recent runs"></ul>
+          <div id="runDetail" class="run-detail" aria-live="polite"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <!-- Confirm-delete dialog: plain <dialog>, no library, focus handled in app.js -->
+  <dialog id="confirmDialog" class="confirm-dialog" aria-labelledby="confirmDialogHeading">
+    <h2 id="confirmDialogHeading">Delete this task?</h2>
+    <p id="confirmDialogBody"></p>
+    <div class="confirm-dialog-actions">
+      <button type="button" class="btn btn-secondary" id="confirmDialogCancel">Cancel</button>
+      <button type="button" class="btn btn-danger" id="confirmDialogConfirm">Delete</button>
+    </div>
+  </dialog>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

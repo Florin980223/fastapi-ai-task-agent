@@ -1,16 +1,21 @@
-"""Request-correlation, access logging, and request-body-size limiting.
+"""Request-correlation, access logging, request-body-size limiting, and
+response security headers.
 
-Two independent middlewares, added in app/main.py as:
+Three independent middlewares, added in app/main.py as:
 
     app.add_middleware(MaxBodySizeMiddleware, max_bytes=config.MAX_REQUEST_BODY_BYTES)
     app.add_middleware(RequestContextMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
 
 Starlette's add_middleware() prepends, and the stack is built so the
 LAST one added ends up OUTERMOST (runs first on the way in, last on the
-way out) - so RequestContextMiddleware wraps everything, including a
-413 from MaxBodySizeMiddleware, with a request id and one access-log
-line. MaxBodySizeMiddleware sits just inside it, rejecting oversized
-bodies before auth or routing ever run.
+way out) - so SecurityHeadersMiddleware wraps everything (including a
+413 from MaxBodySizeMiddleware and a 500 from RequestContextMiddleware),
+guaranteeing every response - JSON API or static UI file - carries the
+same security headers. RequestContextMiddleware sits just inside it,
+tagging every response with a request id and one access-log line.
+MaxBodySizeMiddleware sits innermost, rejecting oversized bodies before
+auth or routing ever run.
 
 RequestContextMiddleware also handles a genuinely unhandled exception
 itself, rather than only relying on app.main's
@@ -213,3 +218,45 @@ class MaxBodySizeMiddleware:
             }
         )
         await send({"type": "http.response.body", "body": body})
+
+
+# Swagger UI and ReDoc's default HTML (FastAPI's own /docs and /redoc, plus
+# the /openapi.json they both fetch) load their JS/CSS from a CDN - existing,
+# pre-existing behavior this project doesn't control and must keep working.
+# These three paths are the ONLY exemption from the strict CSP below - not a
+# general relaxation, just an acknowledgment that this specific vendored page
+# already depends on an external source.
+_CSP_EXEMPT_PATHS = frozenset({"/docs", "/redoc", "/openapi.json"})
+
+# Strict by construction: no 'unsafe-inline', no 'unsafe-eval', no CDN or any
+# other external origin anywhere. The UI this protects (app/static/) never
+# uses an inline <script>/<style> or an onclick=... attribute, so it never
+# needs an exception either.
+_CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self'; "
+    "connect-src 'self'; "
+    "img-src 'self' data:; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Adds a fixed set of response security headers to every response -
+    JSON API responses and the static UI alike. Purely additive: never
+    changes a status code or response body, so it can't weaken any
+    existing API behavior.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        if request.url.path not in _CSP_EXEMPT_PATHS:
+            response.headers.setdefault("Content-Security-Policy", _CONTENT_SECURITY_POLICY)
+        return response
