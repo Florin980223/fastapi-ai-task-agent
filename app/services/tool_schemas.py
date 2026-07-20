@@ -62,6 +62,12 @@ REQUIRED_ARGUMENTS: dict[str, dict[str, type]] = {
     "delete_task": {"task_id": int},
 }
 
+# The one tool whose execution is irreversible enough to require the user to
+# explicitly say yes before it runs. Single source of truth - clarification.py
+# and agent_planner.py both derive from this instead of each keeping their
+# own copy.
+DESTRUCTIVE_TOOLS: frozenset[str] = frozenset({"delete_task"})
+
 
 class ToolCallValidationError(Exception):
     """Raised when a model's tool call fails validation.
@@ -76,10 +82,12 @@ def validate_tool_call(tool_name: str | None, arguments: object) -> None:
     """Validate a model-selected tool name and its arguments' shape.
 
     Checks: the tool name is one of the executable tools, arguments is a
-    dict, and any argument that IS present (and not None) has a
-    reasonable type. Raises ToolCallValidationError on any of those
-    problems - these represent the model malfunctioning/hallucinating,
-    which should trigger a fallback to another decision provider.
+    dict, every key in arguments is one this tool actually accepts, and
+    any argument that IS present (and not None) has a reasonable type.
+    Raises ToolCallValidationError on any of those problems - these
+    represent the model malfunctioning/hallucinating, which should
+    trigger a fallback to another decision provider (subject to
+    agent_decision's fallback-safety gate, not unconditionally).
 
     Deliberately does NOT check that required arguments are present: a
     model that correctly identifies a tool but omits (or explicitly
@@ -87,12 +95,23 @@ def validate_tool_call(tool_name: str | None, arguments: object) -> None:
     decision - that's not a provider failure. See
     app/services/clarification.py, which uses REQUIRED_ARGUMENTS to
     detect that case and ask the user instead of executing.
+
+    This function is called both inside each LLM provider (right after
+    parsing the model's response) and again, independently, at the
+    execution layer (app/routes/agent.py, app/services/agent_planner.py)
+    - so this one change protects both without needing separate logic in
+    either place.
     """
     if tool_name not in REQUIRED_ARGUMENTS:
         raise ToolCallValidationError(f"Model selected an unknown tool: {tool_name!r}.")
 
     if not isinstance(arguments, dict):
         raise ToolCallValidationError(f"Model returned non-dict arguments for '{tool_name}'.")
+
+    allowed_arg_names = TOOL_ARGUMENT_SCHEMAS[tool_name]["properties"].keys()
+    for arg_name in arguments:
+        if arg_name not in allowed_arg_names:
+            raise ToolCallValidationError(f"Model's call to '{tool_name}' has an unsupported argument: {arg_name!r}.")
 
     for arg_name, expected_type in REQUIRED_ARGUMENTS[tool_name].items():
         value = arguments.get(arg_name)

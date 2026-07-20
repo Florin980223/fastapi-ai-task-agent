@@ -25,13 +25,23 @@ configuration at all. `AGENT_DECISION_PROVIDER` can instead be set to:
 - `ollama` (with a local [Ollama](https://ollama.com) server running,
   `OLLAMA_BASE_URL` and `OLLAMA_MODEL`) to ask a local model to pick a tool.
 
-Both fall back to the rule-based logic automatically if they ever fail.
+Both make exactly one constrained repair attempt if the model's first
+response is malformed or fails validation, then — only if the original
+request is single-step, non-destructive, unambiguous, and has no bare
+contextual reference ("it"/"that one") — fall back to the rule-based
+provider. Anything else (a multi-step-shaped request, destructive intent,
+a contextual reference, or a failure caused specifically by bad
+arguments) fails cleanly and asks you to rephrase, instead of silently
+guessing via the deterministic fallback. See "Provider architecture and
+the safe decision flow" under Evaluations below for the full policy and
+why it's this conservative.
 
 Set `AGENT_MULTI_STEP_PLANNING=true` (with `AGENT_DECISION_PROVIDER=ollama`)
-to let `POST /agent/execute` plan and run up to 3 existing tools for a
-single request, e.g. "Create a task to buy milk and then show me all
-tasks". It's off by default, only ever available through Ollama, and never
-includes `delete_task` - deleting a task always goes through its normal
+to let `POST /agent/execute` plan and run up to `AGENT_MAX_PLAN_STEPS`
+(default `3`, minimum `2`) existing tools for a single request, e.g.
+"Create a task to buy milk and then show me all tasks". It's off by
+default, only ever available through Ollama, and never includes
+`delete_task` - deleting a task always goes through its normal
 confirmation flow, one request at a time. Any request that can't be turned
 into a safe plan runs nothing and reports a clear error instead of falling
 back to guessing a single action.
@@ -350,18 +360,48 @@ request's `request_id`.
 
 A separate, offline evaluation suite - distinct from `pytest` - measures
 agent *quality* against a versioned dataset of real user messages and
-expected outcomes (`evals/data/cases_v1.jsonl`, ~35 cases across all 7
-categories, balanced between English and Romanian). It drives the real
-`/agent/execute` endpoint (never reimplementing its routing/decision
+expected outcomes (`evals/data/cases_v1.jsonl`, 43 cases across 9
+categories, mostly balanced between English and Romanian). It drives the
+real `/agent/execute` endpoint (never reimplementing its routing/decision
 logic), checks both response fields *and* actual database side effects,
 and runs in an isolated temp-file SQLite database that's deleted
 afterward - it never touches `tasks.db`.
+
+The 9 categories: `single_step_tool_selection`, `argument_extraction`,
+`clarification_behavior`, `destructive_confirmation`, `no_tool_messages`,
+`safe_multi_step_planning`, `destructive_multi_step_rejection`,
+`context_usage` (does `resolve_remembered_task_id` correctly fill a
+missing task id from "it"/"that one", including across a
+create-then-confirm-then-delete sequence?), and
+`malformed_output_recovery` (does a scripted broken-then-repaired, or
+broken-twice, Ollama response get handled safely - repaired and executed,
+or safely refused - by the shared validation/repair layer? See "Provider
+architecture and the safe decision flow" below). The last category is
+only ever meaningfully exercised in `mocked-ollama` mode - `rule_based`
+never touches an Ollama seam, and a real `live-ollama` model can't be
+scripted, so both modes just run the message through their own real
+logic instead and land on the same answer.
 
 ```bash
 python -m evals.run                        # rule_based mode (default)
 python -m evals.run --mode mocked-ollama
 python -m evals.run --mode live-ollama --allow-live-ollama
 ```
+
+The `pytest` suite's own mocked-provider tests (no `--mode` flag - these
+are ordinary `pytest` tests, included in the default `python -m pytest`
+run and in CI) cover the providers and the shared validation/repair layer
+directly, including malformed-JSON/unknown-tool/wrong-type/unknown-
+argument/timeout/connection-failure cases and repair-retry success and
+failure:
+
+```bash
+python -m pytest tests/test_decision_validation.py tests/test_ollama_decision_provider.py tests/test_anthropic_decision_provider.py tests/test_agent_decision.py tests/test_multi_step_planning.py -v
+```
+
+None of these ever make a real Ollama or Anthropic call - every one mocks
+the provider's own private HTTP-call function or client factory (see
+"Provider architecture and the safe decision flow" below).
 
 Three modes, each measuring something different - and the report always
 says which:
@@ -386,6 +426,114 @@ a usage/setup error. Thresholds are mode-calibrated (`rule_based` has a
 structurally lower ceiling - no Romanian tool-selection keywords and no
 multi-step planning at all outside `ollama`) and overridable via
 `--min-overall-accuracy`/`--min-safety-accuracy`.
+
+**Acceptance thresholds, by category of test:**
+
+| what | gate | current threshold |
+|---|---|---|
+| Deterministic `rule_based` evals | `python -m evals.run` (CI) | overall ≥ 0.55, safety ≥ 0.6 |
+| Mocked provider `pytest` tests | `python -m pytest` (CI) | 100% pass - binary, no percentage applies |
+| `mocked-ollama` evals | `--mode mocked-ollama` (CI) | overall ≥ 0.95, safety ≥ 1.0, **and** `destructive_confirmation`/`malformed_output_recovery` categories = 1.0 each |
+| Optional `live-ollama` evals | `--mode live-ollama --allow-live-ollama` (local only, never CI) | overall ≥ 0.75, safety ≥ 1.0 - informational |
+
+The per-category floors on `mocked-ollama` exist so a systemic failure
+concentrated in one category can't hide behind a passing overall average
+(`evals/runner.py::_determine_exit_code`) - per-category accuracy is
+always printed regardless, but these two specifically also gate the exit
+code, since "mostly right" isn't acceptable for either a destructive
+action's confirmation gating or the malformed-output validation/repair/
+fallback pipeline staying safe.
+
+### Provider architecture and the safe decision flow
+
+Three decision providers share one contract (`ToolDecision`/`AgentPlan` in
+`app/services/tool_decision.py`/`agent_plan.py`) and one validator
+(`app/services/tool_schemas.py::validate_tool_call` - checks the tool
+exists, arguments are a dict, every argument key is one the tool actually
+accepts, and any present value has the right type):
+
+- **`rule_based`** - ordered keyword rules + regex argument extraction, no
+  network call, no LLM. The deterministic baseline; never wrapped,
+  retried, or gated by anything below.
+- **`anthropic`** - native Claude tool-use. One call; on a malformed/
+  invalid response, one constrained repair attempt (resends the failed
+  tool-use plus a `tool_result` marked as an error, asking for a
+  correction); still invalid → falls through to the shared fallback-safety
+  gate below.
+- **`ollama`** - OpenAI-style tool-calling over `POST /api/chat` for
+  single-step decisions; genuine JSON-Schema-constrained structured output
+  (Ollama's `format` parameter, set to the plan's own schema) for
+  multi-step planning. Same one-repair-attempt shape as Anthropic.
+  Zero app-level retries beyond that one attempt for either call type.
+
+**The fallback-safety gate** (`app/services/agent_decision.py::_safe_to_fall_back`,
+only reachable after a configured Anthropic/Ollama provider has already
+failed once and, if repairable, failed its one repair attempt too) decides
+whether falling back to `rule_based` is safe for *this specific request*:
+refuses (raises `UnsafeFallbackError`, which the API turns into a clean
+"please rephrase" response - never executes anything) when the message is
+multi-step-shaped, contains destructive intent, contains a bare
+contextual reference ("it"/"that one"), the failure was specifically bad
+arguments on an otherwise-recognized tool, or the message matches more
+than one of `rule_based`'s own keyword rules (ambiguous by its own
+reckoning). Falls back only when none of those apply - in that narrow
+case `rule_based`'s extraction never invents a value, so the user's intent
+is preserved rather than guessed at.
+
+A **pre-model guard** (`agent_planner._has_destructive_intent`) blocks
+multi-step planning outright for a destructive-sounding clause *before*
+ever asking the model - a small model asked to plan "...and then delete
+it" has been observed live silently substituting `mark_task_done` instead
+of refusing. This guard (and the fallback-safety gate above) can only ever
+*block* - neither ever rewrites a selected tool, invents an argument,
+executes anything directly, or bypasses the normal confirmation flow.
+
+**Latency budget:** worst case for one decision call is bounded by
+`2 × OLLAMA_TIMEOUT_SECONDS` (or `2 × ANTHROPIC_TIMEOUT_SECONDS`) - the
+first call's own timeout, plus, only on a repairable failure, one repair
+call under the same timeout. A network/timeout failure never triggers a
+repair attempt (it goes straight to the fallback-safety gate), so it never
+pays that cost.
+
+**Observability without a schema change:** structured log lines (never
+raw prompts, model responses, message text, or argument values - only
+fixed fields: provider, model, latency, whether a repair happened, a
+fixed-vocabulary failure category, and outcome) are emitted at each
+provider call and at multi-step planning time, closing the gap between
+what a trace's `AgentRun`/`AgentRunStep` rows show (only steps actually
+*attempted*) and what was actually *planned*. `AgentRun.decision_provider`
+remains the only piece of this stored in the database - everything else
+is log-only, on purpose (no migration for this).
+
+### Limitations of small local models
+
+A small local model (this project has been run against `qwen3:4b`) can be
+*confidently wrong* without ever producing a malformed response at all -
+no validation layer or repair attempt catches that, only the pre-model
+destructive-intent guard (for the one failure mode it's specifically built
+for) and your own judgment reading a `live-ollama` report. The
+`malformed_output_recovery` eval category measures whether the *pipeline*
+stays safe when a response is broken - it says nothing about how *often*
+a real model actually produces one; that frequency is exactly what an
+occasional local `live-ollama` run is for, informationally, never as a CI
+gate.
+
+### Interpreting eval scores
+
+- **`rule_based`**'s ceiling is structurally below 100% by design (no
+  Romanian keywords, no multi-step planning outside `ollama`) - its
+  threshold (0.55/0.6) reflects that honest ceiling, not a quality bar.
+- **`mocked-ollama`** at anything less than ~100% usually means a real
+  pipeline/contract bug (parsing, validation, safety gating, or tracing),
+  since the "model" only ever echoes back the case's own expected answer
+  or a deliberately scripted malformed response - there's no actual
+  judgment being measured.
+- **`live-ollama`** is the only mode that measures real model judgment.
+  Read its per-category breakdown, not just the overall number - a low
+  `safe_multi_step_planning` score with a perfect `destructive_confirmation`/
+  `destructive_multi_step_rejection` score means the model is imprecise
+  but not unsafe; the reverse would be the one result worth stopping and
+  investigating immediately.
 
 ## Docker
 
@@ -674,31 +822,42 @@ recreates the container).
 
 ## Continuous Integration (CI)
 
-GitHub Actions (`.github/workflows/ci.yml`) runs two independent jobs on
+GitHub Actions (`.github/workflows/ci.yml`) runs three independent jobs on
 every push to `main`, every pull request targeting `main`, and on demand
 via `workflow_dispatch`:
 
 - **Test** — installs `requirements.txt`, runs the full `pytest` suite,
-  runs the offline evaluation suite in `rule_based` mode
-  (`python -m evals.run --mode rule_based`), then verifies the Alembic
-  baseline migration (`python -m alembic upgrade head` followed by
-  `python -m alembic check` against a third isolated SQLite database) -
+  runs the offline evaluation suite in both `rule_based` mode
+  (`python -m evals.run --mode rule_based`) and `mocked-ollama` mode
+  (`python -m evals.run --mode mocked-ollama`) — both fully offline, fast,
+  and deterministic, so both run on every commit — then verifies the
+  Alembic baseline migration (`python -m alembic upgrade head` followed by
+  `python -m alembic check` against a fourth isolated SQLite database) -
   this is the automated version of "don't blindly trust autogenerated
   migration output": if `app/db_models.py` ever changes without a
   matching new revision, this step fails immediately. Uses fake,
   non-secret configuration only (`API_KEYS=ci-test-key-do-not-use:ci-user`,
-  `AGENT_DECISION_PROVIDER=rule_based`, three isolated SQLite databases
+  `AGENT_DECISION_PROVIDER=rule_based`, four isolated SQLite databases
   under the runner's temp directory, one per step) — your local
-  `tasks.db` is never touched.
+  `tasks.db` is never touched. **Deliberately excluded from CI**: `live-ollama`
+  (no local model on a hosted runner, and pulling one on every run would
+  be slow and non-deterministic) and any real Anthropic call (a paid
+  external API call must never run automatically) — both stay opt-in and
+  local-only, see "Evaluations" above.
+- **PostgreSQL integration** — runs the Alembic migration and the opt-in
+  Postgres integration tests against a real, ephemeral `postgres:16.14`
+  service container scoped to this job only - see "PostgreSQL (optional)"
+  below.
 - **Docker build** — builds the repo's `Dockerfile` (now also copying
   `alembic.ini`/`alembic/` into the image) and tags it locally
   (`fastapi-ai-task-agent:ci`) to catch build breakage. It never pushes
   the image anywhere and needs no runtime API keys to build.
 
-CI may download GitHub Actions, Python packages, and Docker base-image
-layers from their respective registries, but the application tests and
-evals themselves make no live calls to Ollama, Anthropic, or Open-Meteo —
-`rule_based` mode and the test suite are fully offline and deterministic.
+CI may download GitHub Actions, Python packages, Docker base-image
+layers, and (for the PostgreSQL job only) the `postgres` image from their
+respective registries, but the application tests and evals themselves
+make no live calls to Ollama, Anthropic, or Open-Meteo — every job is
+fully offline and deterministic with respect to those three.
 
 Run the same checks locally:
 
@@ -707,6 +866,7 @@ python -m pip install -r requirements.txt
 python -m pip check
 python -m pytest -q
 python -m evals.run --mode rule_based
+python -m evals.run --mode mocked-ollama
 python -m alembic upgrade head && python -m alembic check   # against a scratch DATABASE_URL, not tasks.db
 docker build -t fastapi-ai-task-agent:ci .
 ```

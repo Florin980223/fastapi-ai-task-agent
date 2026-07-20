@@ -1,10 +1,19 @@
-"""Unit tests for the rule-based decision provider (no HTTP layer).
+"""Unit tests for the rule-based decision provider (no HTTP layer), plus
+the fallback-safety gate (_safe_to_fall_back) that decides whether an
+Ollama/Anthropic provider failure may fall back to rule_based at all.
 
 These pin down the ToolDecision contract (selected_tool, arguments,
 reason) that any future decision provider (e.g. an LLM-based one)
-would need to match.
+would need to match. Provider-failure-triggers-the-gate integration tests
+(a real Ollama/Anthropic failure reaching the gate) live in
+test_ollama_decision_provider.py / test_anthropic_decision_provider.py;
+this file tests the gate function itself directly, and that rule_based is
+never invoked when the gate blocks.
 """
 
+import pytest
+
+from app.services import agent_decision
 from app.services.agent_decision import decide_tool
 
 
@@ -64,3 +73,81 @@ def test_no_matching_tool_returns_none_selected_tool_and_empty_arguments():
     assert decision.selected_tool is None
     assert decision.arguments == {}
     assert decision.reason == "No matching tool was found for this message."
+
+
+# --- _safe_to_fall_back: the fallback-safety gate -----------------------
+
+
+def test_multi_step_shaped_message_is_not_safe_to_fall_back():
+    assert agent_decision._safe_to_fall_back("Create a task to buy milk and then show me all tasks", None) is False
+
+
+def test_destructive_message_is_not_safe_to_fall_back():
+    assert agent_decision._safe_to_fall_back("Delete task 1", None) is False
+
+
+def test_contextual_reference_is_not_safe_to_fall_back():
+    assert agent_decision._safe_to_fall_back("Mark it as done", None) is False
+
+
+def test_argument_failure_categories_are_not_safe_to_fall_back():
+    assert agent_decision._safe_to_fall_back("Update task 1 to New title", "wrong_type") is False
+    assert agent_decision._safe_to_fall_back("Update task 1 to New title", "unknown_argument") is False
+
+
+def test_ambiguous_message_matching_multiple_rules_is_not_safe_to_fall_back():
+    # "update" (update_task) and "done" (mark_task_done) both match -
+    # rule_based can't cleanly agree with itself on which tool applies.
+    message = "update and mark this done"
+    assert agent_decision._count_matching_rules(message) > 1
+    assert agent_decision._safe_to_fall_back(message, None) is False
+
+
+def test_plain_single_step_message_is_safe_to_fall_back():
+    assert agent_decision._safe_to_fall_back("Add a task to buy milk", None) is True
+    assert agent_decision._safe_to_fall_back("Add a task to buy milk", "unknown_tool") is True
+    assert agent_decision._safe_to_fall_back("Add a task to buy milk", "malformed_json") is True
+
+
+def test_false_positive_destructive_phrasing_does_not_crash_and_stays_blocked(monkeypatch):
+    """"Do not delete the task", "explain how delete works", and a quoted
+    hypothetical are all edge cases the phrase list might or might not
+    literally match - what matters is the outcome always stays safe
+    (blocked), never something in the "must never" list (never falls
+    through to rule_based re-deriving a destructive action from raw text).
+    """
+
+    def fail_if_called(message):
+        raise AssertionError("rule_based must never be consulted for these edge-case messages")
+
+    monkeypatch.setattr(agent_decision, "DECISION_PROVIDER", "ollama")
+    monkeypatch.setattr(agent_decision, "_decide_tool_rule_based", fail_if_called)
+
+    from app.services import ollama_decision_provider
+
+    def raise_network_error(payload):
+        raise ConnectionError("simulated provider outage")
+
+    monkeypatch.setattr(ollama_decision_provider, "_call_ollama", raise_network_error)
+
+    for message in [
+        "Do not delete the task and then show me all tasks",
+        "Explain how delete works and then show me all tasks",
+        'If I said "delete task 3" and then showed my tasks, what would happen?',
+    ]:
+        with pytest.raises(agent_decision.UnsafeFallbackError):
+            agent_decision.decide_tool(message)
+
+
+def test_rule_based_is_never_called_when_the_gate_blocks(monkeypatch):
+    def fail_if_called(message):
+        raise AssertionError("rule_based must never be consulted when the fallback-safety gate blocks")
+
+    from app.services import ollama_decision_provider
+
+    monkeypatch.setattr(agent_decision, "DECISION_PROVIDER", "ollama")
+    monkeypatch.setattr(agent_decision, "_decide_tool_rule_based", fail_if_called)
+    monkeypatch.setattr(ollama_decision_provider, "_call_ollama", lambda payload: (_ for _ in ()).throw(ConnectionError("down")))
+
+    with pytest.raises(agent_decision.UnsafeFallbackError):
+        agent_decision.decide_tool("Delete task 1")

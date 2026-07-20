@@ -29,7 +29,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.config import MULTI_STEP_PLANNING_ENABLED
+from app.config import AGENT_MAX_PLAN_STEPS, MULTI_STEP_PLANNING_ENABLED, OLLAMA_MODEL
 from app.services import agent_decision, agent_service, clarification, conversation_memory, ollama_planner_provider, tool_schemas
 from app.services.agent_plan import AgentPlan, PlannedStep, StepResult
 from app.services.tool_decision import ToolDecision
@@ -41,25 +41,14 @@ logger = logging.getLogger(__name__)
 # Getting these wrong just means a message does or doesn't get a planning
 # attempt; it can never cause a wrong execution, since every plan is fully
 # validated (and every step re-validated) regardless of how it was reached.
-_ENGLISH_CUES = ["then", "after that"]
-_ROMANIAN_CUES = ["și apoi", "iar apoi", "apoi", "după aceea"]
-_MULTI_STEP_CUES = _ENGLISH_CUES + _ROMANIAN_CUES
+# Single source of truth lives in clarification.py (MULTI_STEP_CUES,
+# looks_multi_step) - re-exported here so agent_planner.looks_multi_step(...)
+# keeps working unchanged, and reused as-is by agent_decision's
+# fallback-safety gate, which can't import this module directly (agent_planner
+# already imports agent_decision; importing back would be circular).
+looks_multi_step = clarification.looks_multi_step
 
-
-def looks_multi_step(message: str) -> bool:
-    """Whether the message contains an explicit cue that it's asking for
-    more than one action, in English or Romanian.
-
-    Case-insensitive and word-boundary aware (matches
-    clarification.mentions_contextual_reference's approach), so this
-    correctly handles Romanian diacritics (ș/ă) and never matches a cue as
-    part of an unrelated word.
-    """
-    lowered = message.lower()
-    return any(re.search(r"\b" + re.escape(cue) + r"\b", lowered) for cue in _MULTI_STEP_CUES)
-
-
-_CUE_SPLIT_PATTERN = r"\b(?:" + "|".join(re.escape(cue) for cue in _MULTI_STEP_CUES) + r")\b"
+_CUE_SPLIT_PATTERN = r"\b(?:" + "|".join(re.escape(cue) for cue in clarification.MULTI_STEP_CUES) + r")\b"
 
 
 def _split_into_clauses(message: str) -> list[str]:
@@ -72,23 +61,6 @@ def _split_into_clauses(message: str) -> list[str]:
     return [clause.strip() for clause in re.split(_CUE_SPLIT_PATTERN, lowered) if clause.strip()]
 
 
-# Explicit, deterministic destructive delete/remove phrases (English and
-# Romanian). Specific action phrases, not the bare word "delete" - this is
-# what lets a task title like "delete old files" pass through untouched
-# while "delete it"/"delete task"/etc. as their own clause do not.
-_DESTRUCTIVE_INTENT_PHRASES = {
-    "delete it",
-    "delete task",
-    "remove it",
-    "remove that task",
-    "erase task",
-    "șterge-l",
-    "sterge-l",
-    "șterge task-ul",
-    "elimină task-ul",
-}
-
-
 def _has_destructive_intent(message: str) -> bool:
     """Deterministic pre-planning safety guard: whether any clause of a
     multi-step message expresses an explicit delete/remove intent.
@@ -98,20 +70,19 @@ def _has_destructive_intent(message: str) -> bool:
     destructive intent may silently substitute a different allowed tool
     instead of refusing outright (observed live: "...and then delete it"
     was planned as mark_task_done). This check stops the request before
-    the model is ever consulted, using the same boundary-safe,
-    case-insensitive, English/Romanian phrase matching approach as
-    clarification.mentions_contextual_reference - never a naive substring
-    check.
+    the model is ever consulted. Only ever blocks planning
+    (decide_plan returns None below) - never rewrites a tool, invents an
+    argument, or executes anything; a false positive here just means an
+    extra, safe refusal.
 
     Splitting into clauses first (see _split_into_clauses) keeps a task
     title that happens to contain the word "delete" ("Create a task
     called delete old files and then show my tasks") from being confused
-    with an actual destructive clause ("...and then delete it").
+    with an actual destructive clause ("...and then delete it"). The
+    phrase list itself is shared with agent_decision's single-step
+    fallback-safety gate - see clarification.contains_destructive_intent.
     """
-    for clause in _split_into_clauses(message):
-        if any(re.search(r"\b" + re.escape(phrase) + r"\b", clause) for phrase in _DESTRUCTIVE_INTENT_PHRASES):
-            return True
-    return False
+    return any(clarification.contains_destructive_intent(clause) for clause in _split_into_clauses(message))
 
 
 def should_attempt_planning(message: str) -> bool:
@@ -128,16 +99,25 @@ def should_attempt_planning(message: str) -> bool:
     )
 
 
-# The only tools a plan may use. delete_task is a known, executable tool
-# elsewhere in the app but is never valid inside a multi-step plan - a
-# destructive action must still go through the existing single-step
+# The only tools a plan may use. delete_task (and any other tool in
+# tool_schemas.DESTRUCTIVE_TOOLS) is never valid inside a multi-step plan -
+# a destructive action must still go through the existing single-step
 # confirmation flow (see routes/agent.py), which multi-step plans don't
-# have a way to pause and resume for yet.
-_ALLOWED_PLANNER_TOOLS = {"create_task", "list_tasks", "get_weather", "mark_task_done", "update_task"}
+# have a way to pause and resume for yet. Derived from tool_schemas'
+# single source of truth rather than a second hand-written literal set,
+# so this can never silently drift from clarification.requires_confirmation.
+_ALLOWED_PLANNER_TOOLS = set(tool_schemas.REQUIRED_ARGUMENTS) - tool_schemas.DESTRUCTIVE_TOOLS
 
 # Tools whose successful result is a dict with an integer "id" - the only
 # legal targets for a task_id_from_step reference.
 _TASK_IDENTIFYING_TOOLS = {"create_task", "update_task", "mark_task_done"}
+
+# No tool in _ALLOWED_PLANNER_TOOLS can ever trigger planning itself (none
+# of them is "plan"/"execute" or anything that re-enters agent_planner or
+# agent_decision) - recursive planning is structurally impossible, not
+# merely guarded against at runtime. If a future tool were ever added that
+# could invoke planning, an explicit recursion guard would need to be
+# added here before that tool could be allowed into this set.
 
 
 def _validate_plan(raw: AgentPlan) -> AgentPlan | None:
@@ -149,9 +129,10 @@ def _validate_plan(raw: AgentPlan) -> AgentPlan | None:
     steps = raw.steps
 
     # Defense in depth - AgentPlan.steps already enforces this via
-    # Field(min_length=2, max_length=3), but a plan could in principle be
-    # constructed some other way.
-    if len(steps) not in (2, 3):
+    # Field(min_length=2, max_length=AGENT_MAX_PLAN_STEPS), but a plan
+    # could in principle be constructed some other way (e.g.
+    # model_construct, which bypasses Pydantic validation entirely).
+    if not (2 <= len(steps) <= AGENT_MAX_PLAN_STEPS):
         return None
 
     for index, step in enumerate(steps, start=1):
@@ -183,6 +164,35 @@ def _validate_plan(raw: AgentPlan) -> AgentPlan | None:
     return raw
 
 
+def _log_planned_steps(plan: AgentPlan, started: float) -> None:
+    """Structured log line recording the full planned step list before
+    execution begins - closes the "planned vs executed" trace gap
+    (AgentRunStep rows only ever exist for steps actually attempted,
+    see agent_trace_service.py) without a schema change.
+
+    Fields only - never the user's message or any step's argument
+    values, only tool names/counts/indexes.
+    """
+    logger.info(
+        "multi-step plan accepted",
+        extra={
+            "provider": "ollama",
+            "model": OLLAMA_MODEL,
+            "plan_step_count": len(plan.steps),
+            "planned_tools": [step.tool for step in plan.steps],
+            "step_indexes": list(range(1, len(plan.steps) + 1)),
+            "has_validated_references": any(step.task_id_from_step is not None for step in plan.steps),
+            # Always False for anything reaching this point - _validate_plan
+            # guarantees no destructive tool survives - kept as an explicit
+            # field so a log line self-documents the invariant rather than
+            # requiring a reader to know it.
+            "has_destructive_tool": any(step.tool in tool_schemas.DESTRUCTIVE_TOOLS for step in plan.steps),
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "validation_outcome": "accepted",
+        },
+    )
+
+
 def decide_plan(message: str) -> AgentPlan | None:
     """Only call once should_attempt_planning(message) is True.
 
@@ -194,13 +204,19 @@ def decide_plan(message: str) -> AgentPlan | None:
         logger.warning("Refusing to plan a message with destructive delete/remove intent.")
         return None
 
+    started = time.monotonic()
     try:
         raw_plan = ollama_planner_provider.plan(message)
     except ollama_planner_provider.OllamaPlanningError as exc:
-        logger.warning("Ollama planning failed (%s).", exc)
+        logger.warning("Ollama planning failed (category=%s).", exc.category)
         return None
 
-    return _validate_plan(raw_plan)
+    validated = _validate_plan(raw_plan)
+    if validated is None:
+        return None
+
+    _log_planned_steps(validated, started)
+    return validated
 
 
 def _resolve_step_arguments(step: PlannedStep, results: list[StepResult]) -> dict | None:

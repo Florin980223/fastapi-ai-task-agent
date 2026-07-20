@@ -43,7 +43,10 @@ def get_tools():
 
 @router.post("/decide-tool", response_model=DecideToolResponse)
 def decide_tool(request: DecideToolRequest):
-    decision = agent_decision.decide_tool(request.message)
+    try:
+        decision = agent_decision.decide_tool(request.message)
+    except agent_decision.UnsafeFallbackError as exc:
+        return DecideToolResponse(message=request.message, selected_tool=None, reason=str(exc))
     return DecideToolResponse(
         message=request.message,
         selected_tool=decision.selected_tool,
@@ -246,7 +249,30 @@ def execute(
                     steps=[],
                 )
                 return response
-            decision = agent_decision.decide_tool(message)
+            try:
+                decision = agent_decision.decide_tool(message)
+            except agent_decision.UnsafeFallbackError as exc:
+                # A configured LLM provider failed and it wasn't judged
+                # safe to fall back to rule_based for this message (see
+                # agent_decision._safe_to_fall_back) - fail cleanly instead
+                # of guessing, mirroring the multi-step planning-failure
+                # response shape above. Never executes anything.
+                response = ExecuteResponse(
+                    run_id=run_id,
+                    conversation_id=conversation_id,
+                    message=message,
+                    selected_tool=None,
+                    result=None,
+                    reason=str(exc),
+                    final_answer=str(exc),
+                    needs_clarification=False,
+                    clarification_question=None,
+                    needs_confirmation=False,
+                    confirmation_question=None,
+                    is_multi_step=False,
+                    steps=[],
+                )
+                return response
 
         # Fill in a missing task_id from remembered context, but only if the
         # message explicitly refers back to a prior task ("it", "that task").

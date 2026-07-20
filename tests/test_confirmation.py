@@ -49,6 +49,37 @@ def test_yes_executes_the_stored_delete(client):
     assert client.get("/tasks").json() == []
 
 
+def test_confirmation_reply_content_can_never_redirect_what_executes(client):
+    """The tool/arguments that execute on confirmation come only from the
+    atomically-consumed stored row (conversation_memory.consume_confirmation)
+    - never from anything in the confirming message's own text. A reply
+    that isn't an exact "yes"/"confirm"/"proceed"/"da" match is treated as
+    ambiguous and changes nothing, even if it looks like an attempt to
+    redirect the action to a different task.
+    """
+    task_a = _execute(client, "Add a task to buy milk")["result"]["id"]
+    task_b = _execute(client, "Add a task to buy eggs")["result"]["id"]
+
+    asked = _execute(client, f"Delete task {task_a}")
+    conversation_id = asked["conversation_id"]
+    assert asked["needs_confirmation"] is True
+
+    # Not an exact confirmation phrase - must be treated as ambiguous, not
+    # as a "yes" that somehow also changed which task is targeted.
+    ambiguous = _execute(client, f"yes but delete task {task_b} instead", conversation_id=conversation_id)
+
+    assert ambiguous["needs_confirmation"] is True
+    assert ambiguous["confirmation_question"] == asked["confirmation_question"]
+    remaining_ids = {task["id"] for task in client.get("/tasks").json()}
+    assert remaining_ids == {task_a, task_b}
+
+    # The original pending confirmation (for task_a) is still exactly
+    # what a real "yes" executes.
+    confirmed = _execute(client, "yes", conversation_id=conversation_id)
+    assert confirmed["result"] == {"status": "deleted", "task_id": task_a}
+    assert {task["id"] for task in client.get("/tasks").json()} == {task_b}
+
+
 def test_da_executes_the_stored_delete(client):
     created = _execute(client, "Add a task to buy milk")
     task_id = created["result"]["id"]

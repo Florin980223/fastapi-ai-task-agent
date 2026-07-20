@@ -26,6 +26,7 @@ class MockOllamaProvider:
         with MockOllamaProvider() as mock:
             for case in cases:
                 mock.set_expected(case.expected)
+                mock.set_simulated_responses(case.simulate_ollama_responses)
                 ...
 
     Also forces agent_decision.DECISION_PROVIDER = "ollama" and
@@ -37,6 +38,8 @@ class MockOllamaProvider:
 
     def __init__(self) -> None:
         self._expected: ExpectedOutcome | None = None
+        self._simulated_responses: list[dict] | None = None
+        self._simulated_call_index = 0
         self._previous_decision_provider: str | None = None
         self._previous_multi_step_enabled: bool | None = None
         self._previous_call_ollama = None
@@ -45,7 +48,27 @@ class MockOllamaProvider:
     def set_expected(self, expected: ExpectedOutcome) -> None:
         self._expected = expected
 
+    def set_simulated_responses(self, responses: list[dict] | None) -> None:
+        """Opt-in override for a case's malformed_output_recovery scenario:
+        a scripted sequence of raw /api/chat response payloads returned in
+        order (first call gets responses[0], second call - e.g. a repair
+        attempt - gets responses[1], and so on; the last entry repeats for
+        any further call). None (the default for every other case)
+        restores the normal "echo `expected`" behavior.
+        """
+        self._simulated_responses = responses
+        self._simulated_call_index = 0
+
+    def _next_simulated_response(self) -> dict:
+        responses = self._simulated_responses
+        index = min(self._simulated_call_index, len(responses) - 1)
+        self._simulated_call_index += 1
+        return responses[index]
+
     def _fake_call_ollama(self, payload: dict) -> dict:
+        if self._simulated_responses is not None:
+            return self._next_simulated_response()
+
         expected = self._expected
         if expected is None or expected.selected_tool is None:
             return {"message": {"role": "assistant", "content": "", "tool_calls": []}, "done": True}
@@ -61,6 +84,9 @@ class MockOllamaProvider:
         }
 
     def _fake_call_ollama_plan(self, payload: dict) -> dict:
+        if self._simulated_responses is not None:
+            return self._next_simulated_response()
+
         expected = self._expected
         steps = [{"tool": step.tool, "arguments": step.arguments} for step in (expected.step_tools or [])] if expected else []
         return {"message": {"role": "assistant", "content": json.dumps({"steps": steps})}, "done": True}

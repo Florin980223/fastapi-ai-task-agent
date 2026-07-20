@@ -78,13 +78,76 @@ def is_cancellation(message: str) -> bool:
 
 # Tools whose execution is irreversible enough to require the user to
 # explicitly say yes before it runs, instead of executing as soon as the
-# decision is complete.
-_DESTRUCTIVE_TOOLS = {"delete_task"}
+# decision is complete. Single source of truth is tool_schemas.DESTRUCTIVE_TOOLS
+# - kept as a module-level alias here rather than a second literal set, so
+# clarification.py and agent_planner.py can never silently drift apart on
+# which tools count as destructive.
+_DESTRUCTIVE_TOOLS = tool_schemas.DESTRUCTIVE_TOOLS
 
 
 def requires_confirmation(selected_tool: str | None) -> bool:
     """Whether a complete decision for this tool must be confirmed before it runs."""
     return selected_tool in _DESTRUCTIVE_TOOLS
+
+
+# Explicit, deterministic destructive delete/remove phrases (English and
+# Romanian). Specific action phrases, not the bare word "delete" - this is
+# what lets a task title like "delete old files" pass through untouched
+# while "delete it"/"delete task"/etc. as their own clause/message do not.
+# Single source of truth for two independent, deliberately conservative
+# guards: agent_planner._has_destructive_intent (per-clause, blocks
+# multi-step planning) and agent_decision's fallback-safety gate (whole
+# message, blocks a silent fallback to rule_based). Both guards only ever
+# block/ask-for-confirmation on a match - neither rewrites a tool, invents
+# an argument, or executes anything directly; a false-positive match here
+# just means an extra, safe refusal, never an unsafe action.
+_DESTRUCTIVE_INTENT_PHRASES = {
+    "delete it",
+    "delete task",
+    "remove it",
+    "remove that task",
+    "erase task",
+    "șterge-l",
+    "sterge-l",
+    "șterge task-ul",
+    "elimină task-ul",
+}
+
+
+def contains_destructive_intent(text: str) -> bool:
+    """Whether this text (a whole message, or a single clause of one)
+    contains explicit destructive/delete intent phrasing.
+
+    Case-insensitive, word-boundary aware (same approach as
+    mentions_contextual_reference) - never a naive substring check, so a
+    task title containing "delete" as part of a longer word can't
+    falsely match.
+    """
+    lowered = text.lower()
+    return any(re.search(r"\b" + re.escape(phrase) + r"\b", lowered) for phrase in _DESTRUCTIVE_INTENT_PHRASES)
+
+
+# Deterministic, scope-limiting cues that a message is asking for more than
+# one action, in English or Romanian. Single source of truth for two
+# independent callers: agent_planner.should_attempt_planning (should this
+# even be offered to the multi-step planner?) and agent_decision's
+# fallback-safety gate (a multi-step-shaped message must not be silently
+# handed to rule_based, which can only ever pick one tool).
+_ENGLISH_CUES = ["then", "after that"]
+_ROMANIAN_CUES = ["și apoi", "iar apoi", "apoi", "după aceea"]
+MULTI_STEP_CUES = _ENGLISH_CUES + _ROMANIAN_CUES
+
+
+def looks_multi_step(message: str) -> bool:
+    """Whether the message contains an explicit cue that it's asking for
+    more than one action, in English or Romanian.
+
+    Case-insensitive and word-boundary aware, so this correctly handles
+    Romanian diacritics (ș/ă) and never matches a cue as part of an
+    unrelated word.
+    """
+    lowered = message.lower()
+    return any(re.search(r"\b" + re.escape(cue) + r"\b", lowered) for cue in MULTI_STEP_CUES)
 
 
 def build_confirmation_question(decision: ToolDecision) -> str:

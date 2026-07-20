@@ -14,10 +14,12 @@ from pydantic import BaseModel, Field, model_validator
 DATASET_VERSION = "v1"
 DEFAULT_DATASET_PATH = Path(__file__).parent / "data" / "cases_v1.jsonl"
 
-# The 7 evaluation categories from the eval plan. Kept as a plain set
-# (not a Literal type) so a new category can be added to the dataset
-# without a code change here - categories are free-form strings, this is
-# just the documented, expected vocabulary.
+# The evaluation categories. Kept as a plain set (not a Literal type) so
+# a new category can be added to the dataset without a code change here -
+# categories are free-form strings, this is just the documented, expected
+# vocabulary. context_usage and malformed_output_recovery were added for
+# Agent Quality v2 - see evals/mock_ollama.py's simulate_ollama_responses
+# handling for the latter.
 CATEGORIES = {
     "single_step_tool_selection",
     "argument_extraction",
@@ -26,6 +28,8 @@ CATEGORIES = {
     "no_tool_messages",
     "safe_multi_step_planning",
     "destructive_multi_step_rejection",
+    "context_usage",
+    "malformed_output_recovery",
 }
 
 
@@ -84,6 +88,14 @@ class EvalCase(BaseModel):
     expected: ExpectedOutcome
     expected_side_effects: ExpectedSideEffects | None = None
     notes: str | None = None
+    # Opt-in, mocked-ollama-only: a scripted sequence of raw Ollama
+    # /api/chat response payloads to return in order (see
+    # evals/mock_ollama.py) instead of the default "echo `expected`"
+    # behavior - e.g. a first entry with an unknown tool name (malformed),
+    # then a second, valid entry (a successful repair). Ignored entirely
+    # by rule_based (never touches an Ollama seam at all) and live-ollama
+    # (a real model can't be scripted) - only mocked-ollama consults it.
+    simulate_ollama_responses: list[dict] | None = None
 
     @model_validator(mode="after")
     def _exactly_one_message_source(self) -> "EvalCase":

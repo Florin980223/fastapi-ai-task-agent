@@ -17,10 +17,26 @@ import logging
 import re
 
 from app.config import DECISION_PROVIDER
-from app.services import anthropic_decision_provider, ollama_decision_provider
+from app.services import anthropic_decision_provider, clarification, decision_validation, ollama_decision_provider
 from app.services.tool_decision import ToolDecision
 
 logger = logging.getLogger(__name__)
+
+
+class UnsafeFallbackError(Exception):
+    """Raised by decide_tool when a configured LLM provider failed and
+    falling back to the deterministic rule_based provider would not be
+    safe for this particular message (see _safe_to_fall_back).
+
+    The caller (routes/agent.py) must produce a clean, no-execution
+    response - never retry, never guess, never execute anything. This is
+    never raised for rule_based itself, which is never wrapped or gated by
+    any of this - only a configured Anthropic/Ollama failure can reach it.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 # Each rule is (tool_name, keywords, reason). Rules are checked in
@@ -225,22 +241,106 @@ def _decide_tool_rule_based(message: str) -> ToolDecision:
     return ToolDecision(selected_tool=selected_tool, arguments=arguments, reason=reason)
 
 
+def _count_matching_rules(message: str) -> int:
+    """How many of RULES' own keyword triggers match this message.
+
+    Used only by _safe_to_fall_back to judge whether rule_based itself
+    would be confident/unambiguous about this message - never to select a
+    tool (that's still _select_tool's first-match-wins job, unchanged).
+    """
+    lowered = message.lower()
+    return sum(1 for _, keywords, _ in RULES if any(keyword in lowered for keyword in keywords))
+
+
+# Failure categories (see decision_validation.classify_validation_failure)
+# where the model picked a real tool but supplied bad arguments - as
+# opposed to a totally garbled/unknown-tool response. Re-deriving
+# arguments from raw text via rule_based's crude regex extraction on a
+# message we already know produced bad arguments once is exactly the kind
+# of guess this gate rules out.
+_ARGUMENT_FAILURE_CATEGORIES = {"wrong_type", "unknown_argument"}
+
+
+def _safe_to_fall_back(message: str, failure_category: str | None) -> bool:
+    """Whether it's safe to fall back to the deterministic rule_based
+    provider after a configured LLM provider has failed.
+
+    Returns False - fail safely instead of guessing - when:
+    - the message is multi-step-shaped (rule_based can only ever pick one
+      tool, silently dropping the rest of a multi-action request);
+    - the message contains destructive-intent phrasing;
+    - the message contains a bare contextual reference ("it"/"that one");
+    - the failure was specifically that the model picked a real tool but
+      supplied bad arguments (_ARGUMENT_FAILURE_CATEGORIES);
+    - the message is ambiguous by rule_based's own reckoning - it matches
+      more than one of RULES' own keyword triggers, so rule_based can't
+      cleanly agree with itself on which tool applies either.
+
+    Returns True only otherwise: the request is single-step-shaped,
+    non-destructive, has no contextual reference, and the failure (if any)
+    wasn't an argument-validation failure. In that narrow case rule_based's
+    own extraction never invents a value - it only ever pulls from the
+    literal message text - so "preserve the same user intent without
+    inventing information" holds by construction.
+    """
+    if clarification.looks_multi_step(message):
+        return False
+    if clarification.contains_destructive_intent(message):
+        return False
+    if clarification.mentions_contextual_reference(message):
+        return False
+    if failure_category in _ARGUMENT_FAILURE_CATEGORIES:
+        return False
+    if _count_matching_rules(message) > 1:
+        return False
+    return True
+
+
+def _handle_provider_failure(provider_name: str, message: str, exc: decision_validation.DecisionProviderError) -> ToolDecision:
+    """Called only when a configured LLM provider has already exhausted
+    its one repair attempt (or failed immediately on a network/timeout
+    error) and raised. Either falls back to rule_based (only when
+    _safe_to_fall_back says so) or raises UnsafeFallbackError - never
+    executes anything itself, never retries the provider again.
+    """
+    if _safe_to_fall_back(message, exc.category):
+        logger.warning("%s decision provider failed (category=%s); falling back to rule-based.", provider_name, exc.category)
+        logger.info(
+            "decision fallback",
+            extra={"provider": provider_name, "outcome": "fallback_to_rule_based", "validation_failure_category": exc.category},
+        )
+        return _decide_tool_rule_based(message)
+
+    logger.warning("%s decision provider failed (category=%s); not safe to fall back to rule-based.", provider_name, exc.category)
+    logger.info(
+        "decision fallback",
+        extra={"provider": provider_name, "outcome": "unsafe_fallback_blocked", "validation_failure_category": exc.category},
+    )
+    raise UnsafeFallbackError(
+        "I couldn't safely process that request. Could you rephrase it or state exactly what you'd like me to do?"
+    ) from exc
+
+
 def decide_tool(message: str) -> ToolDecision:
     """Decide which tool a message should use - the single entry point routes call.
 
-    Uses the Anthropic or Ollama provider when configured, falling back
-    to the rule-based provider (the default) if neither is configured
-    or if the configured one fails for any reason.
+    Uses the Anthropic or Ollama provider when configured. On a provider
+    failure (after its own one repair attempt), falls back to the
+    rule-based provider only when that's judged safe for this particular
+    message (see _safe_to_fall_back); otherwise raises UnsafeFallbackError
+    instead of guessing. rule_based itself (the default when no LLM
+    provider is configured) is never wrapped, retried, or gated by any of
+    this - it always runs directly.
     """
     if DECISION_PROVIDER == "anthropic":
         try:
             return anthropic_decision_provider.decide_tool(message)
-        except anthropic_decision_provider.AnthropicDecisionError as exc:
-            logger.warning("Anthropic decision provider failed (%s); falling back to rule-based.", exc)
+        except decision_validation.DecisionProviderError as exc:
+            return _handle_provider_failure("anthropic", message, exc)
     elif DECISION_PROVIDER == "ollama":
         try:
             return ollama_decision_provider.decide_tool(message)
-        except ollama_decision_provider.OllamaDecisionError as exc:
-            logger.warning("Ollama decision provider failed (%s); falling back to rule-based.", exc)
+        except decision_validation.DecisionProviderError as exc:
+            return _handle_provider_failure("ollama", message, exc)
 
     return _decide_tool_rule_based(message)

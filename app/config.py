@@ -183,6 +183,17 @@ def _parse_non_negative_int(name: str, raw: str) -> int:
     return value
 
 
+def _parse_int_with_minimum(name: str, raw: str, minimum: int) -> int:
+    raw = raw.strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        raise HardeningConfigError(f"{name} must be an integer >= {minimum}, got {raw!r}.")
+    if value < minimum:
+        raise HardeningConfigError(f"{name} must be an integer >= {minimum}, got {value}.")
+    return value
+
+
 def _parse_positive_float(name: str, raw: str) -> float:
     raw = raw.strip()
     try:
@@ -244,6 +255,19 @@ ANTHROPIC_TIMEOUT_SECONDS = _parse_positive_float(
 # instead of relying on the SDK's invisible default (which is also 2).
 ANTHROPIC_MAX_RETRIES = _parse_non_negative_int(
     "ANTHROPIC_MAX_RETRIES", os.environ.get("ANTHROPIC_MAX_RETRIES", "2")
+)
+
+# Hard cap on how many steps a single multi-step plan
+# (app/services/agent_plan.py's AgentPlan) may contain - threaded into
+# both the Pydantic Field bound and agent_planner._validate_plan's
+# defense-in-depth re-check, so the two can never drift apart, and into
+# the planner's own prompt text. Minimum of 2 - a "plan" of exactly 1 step
+# is just a single-step decision, already handled by the ordinary
+# single-step pipeline. Only takes effect for the Ollama provider - the
+# only one multi-step planning ever runs under. Default of 3 preserves
+# today's hardcoded behavior exactly.
+AGENT_MAX_PLAN_STEPS = _parse_int_with_minimum(
+    "AGENT_MAX_PLAN_STEPS", os.environ.get("AGENT_MAX_PLAN_STEPS", "3"), minimum=2
 )
 
 # Minimal in-memory, per-user, fixed-window rate limit on POST

@@ -49,14 +49,18 @@ def test_correct_argument_parsing(monkeypatch):
 
 
 def test_unknown_tool_falls_back_to_rule_based(monkeypatch):
+    # The original message is non-destructive/single-step/unambiguous, so
+    # falling back to rule_based for it is safe - the model's own
+    # (hallucinated) response is discarded entirely; rule_based re-derives
+    # from the original message text, never from anything the model said.
     response = _fake_chat_response([_tool_call("delete_everything", {"task_id": 1})])
     monkeypatch.setattr(agent_decision, "DECISION_PROVIDER", "ollama")
     monkeypatch.setattr(ollama_decision_provider, "_call_ollama", lambda payload: response)
 
-    decision = agent_decision.decide_tool("Delete task 1")
+    decision = agent_decision.decide_tool("Add a task to buy milk")
 
-    assert decision.selected_tool == "delete_task"
-    assert decision.arguments == {"task_id": 1}
+    assert decision.selected_tool == "create_task"
+    assert decision.arguments == {"title": "buy milk"}
 
 
 def test_missing_tool_call_falls_back_to_rule_based(monkeypatch):
@@ -64,10 +68,25 @@ def test_missing_tool_call_falls_back_to_rule_based(monkeypatch):
     monkeypatch.setattr(agent_decision, "DECISION_PROVIDER", "ollama")
     monkeypatch.setattr(ollama_decision_provider, "_call_ollama", lambda payload: response)
 
-    decision = agent_decision.decide_tool("Delete task 1")
+    decision = agent_decision.decide_tool("Add a task to buy milk")
 
-    assert decision.selected_tool == "delete_task"
-    assert decision.arguments == {"task_id": 1}
+    assert decision.selected_tool == "create_task"
+    assert decision.arguments == {"title": "buy milk"}
+
+
+def test_destructive_message_is_never_silently_handed_to_rule_based_on_provider_failure(monkeypatch):
+    """The safety gate (agent_decision._safe_to_fall_back) must block a
+    fallback for a destructive-shaped message, even though rule_based
+    itself could deterministically produce a correct delete_task decision
+    for it - a provider failure on a destructive request must fail
+    cleanly, never silently re-derive via the deterministic path.
+    """
+    response = _fake_chat_response([_tool_call("delete_everything", {"task_id": 1})])
+    monkeypatch.setattr(agent_decision, "DECISION_PROVIDER", "ollama")
+    monkeypatch.setattr(ollama_decision_provider, "_call_ollama", lambda payload: response)
+
+    with pytest.raises(agent_decision.UnsafeFallbackError):
+        agent_decision.decide_tool("Delete task 1")
 
 
 def test_missing_required_argument_does_not_fall_back(monkeypatch):
@@ -85,16 +104,18 @@ def test_missing_required_argument_does_not_fall_back(monkeypatch):
     assert "Ollama" in decision.reason
 
 
-def test_wrong_argument_type_falls_back_to_rule_based(monkeypatch):
-    # task_id is present but the wrong type - this IS a provider failure.
-    response = _fake_chat_response([_tool_call("delete_task", {"task_id": "not-a-number"})])
+def test_argument_validation_failure_is_never_silently_handed_to_rule_based(monkeypatch):
+    """Even for a non-destructive message, a "the model picked a real
+    tool but supplied bad arguments" failure must never fall back to
+    rule_based re-deriving arguments from raw text - see
+    agent_decision._ARGUMENT_FAILURE_CATEGORIES.
+    """
+    response = _fake_chat_response([_tool_call("update_task", {"task_id": "not-a-number", "title": "New title"})])
     monkeypatch.setattr(agent_decision, "DECISION_PROVIDER", "ollama")
     monkeypatch.setattr(ollama_decision_provider, "_call_ollama", lambda payload: response)
 
-    decision = agent_decision.decide_tool("Delete task 1")
-
-    assert decision.selected_tool == "delete_task"
-    assert decision.arguments == {"task_id": 1}
+    with pytest.raises(agent_decision.UnsafeFallbackError):
+        agent_decision.decide_tool("Update task 1 to New title")
 
 
 @pytest.mark.parametrize(
@@ -111,10 +132,33 @@ def test_connection_or_timeout_falls_back_to_rule_based(monkeypatch, exception):
     monkeypatch.setattr(agent_decision, "DECISION_PROVIDER", "ollama")
     monkeypatch.setattr(ollama_decision_provider, "_call_ollama", raise_exception)
 
-    decision = agent_decision.decide_tool("Delete task 1")
+    decision = agent_decision.decide_tool("Add a task to buy milk")
 
-    assert decision.selected_tool == "delete_task"
-    assert decision.arguments == {"task_id": 1}
+    assert decision.selected_tool == "create_task"
+    assert decision.arguments == {"title": "buy milk"}
+
+
+@pytest.mark.parametrize(
+    "exception",
+    [
+        httpx.ConnectError("connection refused"),
+        httpx.TimeoutException("request timed out"),
+    ],
+)
+def test_connection_or_timeout_on_a_destructive_message_never_falls_back(monkeypatch, exception):
+    """A timeout/connection failure must go through the exact same
+    fallback-safety gate a malformed-output failure does - it never gets
+    an easier path just because "it wasn't the model's fault."
+    """
+
+    def raise_exception(payload):
+        raise exception
+
+    monkeypatch.setattr(agent_decision, "DECISION_PROVIDER", "ollama")
+    monkeypatch.setattr(ollama_decision_provider, "_call_ollama", raise_exception)
+
+    with pytest.raises(agent_decision.UnsafeFallbackError):
+        agent_decision.decide_tool("Delete task 1")
 
 
 def _capture_payload(monkeypatch, response):

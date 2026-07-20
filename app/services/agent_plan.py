@@ -10,6 +10,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.config import AGENT_MAX_PLAN_STEPS
+
 
 class PlannedStep(BaseModel):
     """One step of a plan, as produced by a planner - untrusted until
@@ -28,15 +30,18 @@ class PlannedStep(BaseModel):
 
 
 class AgentPlan(BaseModel):
-    """An ordered sequence of tool steps, 2 to 3 long.
+    """An ordered sequence of tool steps, 2 to AGENT_MAX_PLAN_STEPS long.
 
     min_length=2 means a "plan" of 0 or 1 steps is rejected as early as
     possible (at JSON-parse time in ollama_planner_provider.plan) rather
     than ever being treated as a valid multi-step plan - a 1-step request
-    is a single-step request, full stop.
+    is a single-step request, full stop. max_length is the configured
+    maximum (app.config.AGENT_MAX_PLAN_STEPS, default 3) - also re-checked
+    independently in agent_planner._validate_plan as defense in depth, in
+    case a plan is ever constructed some other way.
     """
 
-    steps: list[PlannedStep] = Field(min_length=2, max_length=3)
+    steps: list[PlannedStep] = Field(min_length=2, max_length=AGENT_MAX_PLAN_STEPS)
 
 
 class StepResult(BaseModel):

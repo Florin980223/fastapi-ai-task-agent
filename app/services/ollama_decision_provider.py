@@ -11,13 +11,17 @@ the rule-based provider if anything here fails.
 
 import copy
 import json
+import logging
+import time
 
 import httpx
 
 from app.config import OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT_SECONDS
-from app.services import tool_schemas
+from app.services import decision_validation, tool_schemas
 from app.services.tool_decision import ToolDecision
 from app.services.tool_registry import AVAILABLE_TOOLS
+
+logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = (
     "You are the decision-making layer of a small task-management assistant.\n\n"
@@ -43,7 +47,8 @@ _SYSTEM_PROMPT = (
     '- "I want to delete one of my tasks, but I do not know its ID" -> call delete_task with no arguments.\n'
     '- "I finished one of my tasks" -> call mark_task_done with no arguments.\n'
     '- "Show me my tasks" -> call list_tasks.\n'
-    '- "Rename one of my tasks" -> call update_task with no arguments.'
+    '- "Rename one of my tasks" -> call update_task with no arguments.\n\n'
+    "Respond only through the provided tool-call mechanism - never with plain prose."
 )
 
 # Local Ollama can be slow to respond on a cold model load - see
@@ -51,7 +56,7 @@ _SYSTEM_PROMPT = (
 # than the Anthropic provider's) timeout value used below.
 
 
-class OllamaDecisionError(Exception):
+class OllamaDecisionError(decision_validation.DecisionProviderError):
     """Raised whenever the Ollama provider can't produce a trustworthy decision.
 
     Covers the server being unreachable/slow, invalid JSON, missing tool
@@ -114,34 +119,25 @@ def _call_ollama(payload: dict) -> dict:
     return response.json()
 
 
-def decide_tool(message: str) -> ToolDecision:
-    """Ask a local Ollama model to pick a tool (and arguments) for the message.
-
-    Raises OllamaDecisionError if the request fails, times out, returns
-    invalid JSON, doesn't call a tool, or the tool call is invalid - the
-    caller is expected to fall back to the rule-based provider in that case.
-    """
-    payload = {
+def _build_payload(messages: list[dict]) -> dict:
+    return {
         "model": OLLAMA_MODEL,
-        "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": message},
-        ],
+        "messages": messages,
         "tools": _build_ollama_tools(),
         "stream": False,
         "think": False,
         "options": {"temperature": 0},
     }
 
-    try:
-        data = _call_ollama(payload)
-    except Exception as exc:  # broad on purpose: any failure here must trigger a safe fallback
-        raise OllamaDecisionError(f"Ollama request failed: {exc}") from exc
 
-    tool_calls = (data.get("message") or {}).get("tool_calls") or []
-    if not tool_calls:
-        raise OllamaDecisionError("Ollama did not call a tool for this message.")
-
+def _parse_tool_call(tool_calls: list[dict]) -> tuple[str | None, dict]:
+    """Extract and validate a tool name/arguments from Ollama's tool_calls
+    list. Only ever looks at the first call, even if the model returned
+    more than one. Raises json.JSONDecodeError or
+    tool_schemas.ToolCallValidationError on a malformed/invalid call -
+    both are caught by decision_validation.attempt_with_repair's caller
+    below.
+    """
     function = tool_calls[0].get("function") or {}
     tool_name = function.get("name")
     arguments = function.get("arguments")
@@ -149,16 +145,101 @@ def decide_tool(message: str) -> ToolDecision:
     # Ollama's arguments are usually already a JSON object, but some
     # models return them as a JSON string - handle that case too.
     if isinstance(arguments, str):
-        try:
-            arguments = json.loads(arguments)
-        except json.JSONDecodeError as exc:
-            raise OllamaDecisionError(f"Ollama returned invalid JSON arguments: {exc}") from exc
+        arguments = json.loads(arguments)
+
+    tool_schemas.validate_tool_call(tool_name, arguments)
+    return tool_name, arguments
+
+
+def _log_decision_outcome(
+    started: float, *, repaired: bool, outcome: str, failure_category: str | None
+) -> None:
+    """Structured log line for one decision call. Fields only - never the
+    user's message, the model's raw response, or any argument value.
+    """
+    logger.info(
+        "ollama decision provider call",
+        extra={
+            "provider": "ollama",
+            "model": OLLAMA_MODEL,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "repaired": repaired,
+            "outcome": outcome,
+            "validation_failure_category": failure_category,
+        },
+    )
+
+
+def decide_tool(message: str) -> ToolDecision:
+    """Ask a local Ollama model to pick a tool (and arguments) for the message.
+
+    On a malformed/invalid first response, makes exactly one constrained
+    repair attempt (re-asking with the error described) before giving up -
+    never more than one, and never for a network/timeout failure, which
+    goes straight to the caller's fallback-safety gate instead. Raises
+    OllamaDecisionError if the request fails, times out, doesn't call a
+    tool, or the tool call is still invalid after the repair attempt - the
+    caller (agent_decision.decide_tool) decides what to do next, it is
+    never assumed safe to just fall back to rule_based here.
+    """
+    started = time.monotonic()
+    initial_messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": message},
+    ]
 
     try:
-        tool_schemas.validate_tool_call(tool_name, arguments)
-    except tool_schemas.ToolCallValidationError as exc:
-        raise OllamaDecisionError(str(exc)) from exc
+        data = _call_ollama(_build_payload(initial_messages))
+    except Exception as exc:  # broad on purpose: a network/timeout failure never gets a repair attempt
+        category = decision_validation.classify_validation_failure(exc)
+        _log_decision_outcome(started, repaired=False, outcome="failed", failure_category=category)
+        raise OllamaDecisionError(f"Ollama request failed: {exc}", category=category) from exc
 
+    tool_calls = (data.get("message") or {}).get("tool_calls") or []
+    if not tool_calls:
+        # Not treated as repairable: a model that declined to call any
+        # tool may simply be correctly reporting "nothing here fits" -
+        # forcing a repair attempt could push it into inventing a tool
+        # call rather than confirming its own answer.
+        _log_decision_outcome(started, repaired=False, outcome="failed", failure_category="empty_response")
+        raise OllamaDecisionError("Ollama did not call a tool for this message.", category="empty_response")
+
+    repair_attempted = []  # mutable cell _repair can set - True as soon as it's called, success or not
+
+    def _repair(exc: Exception) -> tuple[str | None, dict]:
+        repair_attempted.append(True)
+        repair_messages = initial_messages + [
+            {"role": "assistant", "content": "", "tool_calls": tool_calls},
+            {
+                "role": "user",
+                "content": f"That tool call was invalid: {exc}. Call exactly one valid tool with corrected arguments.",
+            },
+        ]
+        repair_data = _call_ollama(_build_payload(repair_messages))
+        repair_tool_calls = (repair_data.get("message") or {}).get("tool_calls") or []
+        if not repair_tool_calls:
+            raise OllamaDecisionError("Ollama did not call a tool for the repair attempt.", category="empty_response")
+        return _parse_tool_call(repair_tool_calls)
+
+    try:
+        tool_name, arguments = decision_validation.attempt_with_repair(
+            primary=lambda: _parse_tool_call(tool_calls),
+            repair=_repair,
+        )
+    except Exception as exc:
+        category = decision_validation.classify_validation_failure(exc)
+        _log_decision_outcome(started, repaired=bool(repair_attempted), outcome="failed", failure_category=category)
+        if isinstance(exc, OllamaDecisionError):
+            raise
+        raise OllamaDecisionError(str(exc), category=category) from exc
+
+    repaired = bool(repair_attempted)
+    _log_decision_outcome(
+        started,
+        repaired=repaired,
+        outcome="executed_after_repair" if repaired else "executed_first_try",
+        failure_category=None,
+    )
     return ToolDecision(
         selected_tool=tool_name,
         arguments=arguments,

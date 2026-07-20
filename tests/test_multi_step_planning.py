@@ -16,6 +16,7 @@ message.
 """
 
 import json
+import uuid
 
 import httpx
 import pydantic
@@ -25,6 +26,7 @@ import app.services.agent_decision as agent_decision
 import app.services.agent_planner as agent_planner
 import app.services.ollama_decision_provider as ollama_decision_provider
 import app.services.ollama_planner_provider as ollama_planner_provider
+from app.config import AGENT_MAX_PLAN_STEPS
 from app.services import weather_service
 from app.services.agent_plan import AgentPlan, PlannedStep
 
@@ -168,6 +170,78 @@ def test_agent_plan_rejects_a_single_step():
 def test_agent_plan_rejects_more_than_three_steps():
     with pytest.raises(pydantic.ValidationError):
         AgentPlan(steps=[PlannedStep(tool="list_tasks", arguments={})] * 4)
+
+
+# --- Execution-layer validation stays authoritative regardless of the
+# --- provider - each test below bypasses Pydantic/_validate_plan on
+# --- purpose (via model_construct, or by calling execute_plan directly
+# --- without ever calling _validate_plan first) to prove the *executor's
+# --- own* check is what actually blocks it, not just that something
+# --- upstream happened to validate first. ---------------------------
+
+
+def test_plan_exceeding_the_configured_max_steps_is_rejected_even_bypassing_pydantic():
+    # model_construct skips Pydantic validation entirely, so this plan has
+    # more steps than AgentPlan's own Field(max_length=...) would ever
+    # allow to be constructed normally.
+    steps = [PlannedStep(tool="list_tasks", arguments={})] * (AGENT_MAX_PLAN_STEPS + 2)
+    bypassed_plan = AgentPlan.model_construct(steps=steps)
+
+    assert agent_planner._validate_plan(bypassed_plan) is None
+
+
+def test_execute_plan_independently_refuses_delete_task_even_if_validate_plan_is_bypassed(new_db_session, test_user_id):
+    # _validate_plan is deliberately never called here - this plan reaches
+    # execute_plan exactly as if some future bug let a destructive tool
+    # slip past the allowlist check.
+    bypassed_plan = AgentPlan.model_construct(
+        steps=[
+            PlannedStep(tool="delete_task", arguments={"task_id": 1}),
+            PlannedStep(tool="list_tasks", arguments={}),
+        ]
+    )
+
+    results = agent_planner.execute_plan(bypassed_plan, new_db_session, uuid.uuid4(), test_user_id)
+
+    assert len(results) == 1
+    assert results[0].status == "stopped"
+    assert results[0].result is None
+    assert "confirmation" in results[0].error.lower()
+
+
+def test_execute_plan_rejects_duplicate_destructive_steps(new_db_session, test_user_id):
+    bypassed_plan = AgentPlan.model_construct(
+        steps=[
+            PlannedStep(tool="delete_task", arguments={"task_id": 1}),
+            PlannedStep(tool="delete_task", arguments={"task_id": 2}),
+        ]
+    )
+
+    results = agent_planner.execute_plan(bypassed_plan, new_db_session, uuid.uuid4(), test_user_id)
+
+    # Stops at the first destructive step - the second delete_task step is
+    # never even attempted, let alone executed.
+    assert len(results) == 1
+    assert results[0].status == "stopped"
+
+
+def test_execute_plan_rejects_an_unsupported_argument(new_db_session, test_user_id):
+    # No bypass needed here: PlannedStep.arguments accepts any string key
+    # at the Pydantic level - only tool_schemas.validate_tool_call (called
+    # inside execute_plan, independently of whatever a provider already
+    # validated) catches an argument a tool doesn't actually accept.
+    plan = AgentPlan(
+        steps=[
+            PlannedStep(tool="create_task", arguments={"title": "buy milk", "priority": "high"}),
+            PlannedStep(tool="list_tasks", arguments={}),
+        ]
+    )
+
+    results = agent_planner.execute_plan(plan, new_db_session, uuid.uuid4(), test_user_id)
+
+    assert len(results) == 1
+    assert results[0].status == "stopped"
+    assert "unsupported argument" in results[0].error.lower()
 
 
 # --- Route-level integration tests ---------------------------------------

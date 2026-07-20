@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   test:
-    name: Test (pytest + rule_based evals)
+    name: Test (pytest + rule_based/mocked-ollama evals)
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -54,6 +54,11 @@ jobs:
         env:
           DATABASE_URL: "sqlite:///${{ runner.temp }}/ci-evals.db"
         run: python -m evals.run --mode rule_based
+
+      - name: Run mocked-ollama evaluation suite
+        env:
+          DATABASE_URL: "sqlite:///${{ runner.temp }}/ci-evals-mocked-ollama.db"
+        run: python -m evals.run --mode mocked-ollama
 
       - name: Verify Alembic baseline migration
         env:
