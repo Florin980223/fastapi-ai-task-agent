@@ -836,6 +836,17 @@ This project stays platform-neutral: the runbook does not assume any
 specific cloud provider, container orchestrator, Redis, Celery, or paid
 service — those remain deliberately out of scope.
 
+## Local production-like demo
+
+A separate, isolated, zero-cost Compose stack (`compose.demo.yaml`) that
+behaves like the future public deployment — its own PostgreSQL database, its
+own dedicated demo identities, its own container/volume/network names — so
+you can exercise the whole app end to end (including per-user isolation)
+without touching your real `tasks.db` or the normal `agent_data`/
+`fastapi-ai-task-agent-postgres-data` volumes. See
+**[docs/LOCAL_DEMO.md](docs/LOCAL_DEMO.md)** for setup, the full walkthrough,
+and safe stop/reset/cleanup commands.
+
 ## Continuous Integration (CI)
 
 GitHub Actions (`.github/workflows/ci.yml`) runs three independent jobs on

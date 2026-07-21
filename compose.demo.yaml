@@ -1,0 +1,76 @@
+# Standalone, isolated "production-like local demo" stack - see
+# docs/LOCAL_DEMO.md. Deliberately a separate file from compose.yaml,
+# not a profile inside it and not an overlay of it, so this can never
+# share resources, project name, or `down -v` blast radius with the
+# normal dev stack. Always invoke this file with an explicit
+# `-p fastapi-ai-task-agent-demo` in addition to the `name:` key below
+# (see docker/demo_start.ps1 and friends) - never rely on Compose's
+# directory-derived default project name, which would otherwise be
+# identical to the main compose.yaml's own default (both live in this
+# same repo directory).
+name: fastapi-ai-task-agent-demo
+
+services:
+  postgres-demo:
+    image: postgres:16.14
+    env_file:
+      - .env.demo
+    ports:
+      # Bound to localhost only, like compose.yaml's postgres service.
+      # A distinct, non-default host port (55434) so this can run
+      # alongside compose.yaml's own postgres service (55432) and the
+      # deploy_smoke CI job's ephemeral Postgres (55433) without ever
+      # colliding.
+      - "127.0.0.1:55434:5432"
+    volumes:
+      - postgres-demo-data:/var/lib/postgresql/data
+    networks:
+      - demo-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  app-demo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fastapi-ai-task-agent:demo-local
+    env_file:
+      - .env.demo
+    ports:
+      - "127.0.0.1:8100:8000"
+    # No volume: once .env.demo's DATABASE_URL points at postgres-demo,
+    # the image's default sqlite:////data/tasks.db is never used, so
+    # there is nothing under /data worth persisting for this service.
+    networks:
+      - demo-net
+    depends_on:
+      postgres-demo:
+        condition: service_healthy
+    restart: unless-stopped
+    # Healthcheck is inherited from the Dockerfile's HEALTHCHECK
+    # instruction (targets /health, liveness only - see
+    # docs/DEPLOYMENT.md's "Health vs. readiness"). Alembic migrations
+    # are never run automatically here either - see
+    # docker/demo_start.ps1's explicit `run --rm app-demo python -m
+    # alembic upgrade head` step.
+
+networks:
+  demo-net:
+    name: fastapi-ai-task-agent-demo-net
+
+volumes:
+  postgres-demo-data:
+    # Explicit, stable name containing "demo" so it can be targeted
+    # precisely by docker/demo_reset_data.ps1 / docker/demo_cleanup.ps1
+    # - see docs/LOCAL_DEMO.md. NEVER use `docker compose down -v`
+    # against this file: always remove this exact named volume
+    # individually instead. This volume is entirely separate from
+    # compose.yaml's own `postgres_data` (named
+    # fastapi-ai-task-agent-postgres-data) - the two can never collide
+    # or be confused for one another.
+    name: fastapi-ai-task-agent-demo-postgres-data

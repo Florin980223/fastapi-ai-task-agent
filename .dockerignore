@@ -13,6 +13,7 @@ venv/
 # Secrets / local env files - never baked into the image
 .env
 .env.docker
+.env.demo
 .env.*.local
 
 # Local databases - the real dev DB must never enter the build context
@@ -28,6 +29,7 @@ evals/
 # Docker recipe files - not needed inside the image itself
 Dockerfile
 compose.yaml
+compose.demo.yaml
 docker/smoke_test.ps1
 docker-data/
 
