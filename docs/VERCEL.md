@@ -5,11 +5,13 @@
 This document describes what's needed to run this app as a zero-cost public
 demo on **Vercel Hobby** (serverless Python functions) + **Neon PostgreSQL
 Free** (a pooled connection string for the running app, a separate direct
-connection string for migrations). **No Vercel project, Neon project, or
-deployment has been created by this feature** - every file described here is
-inert configuration/code that only takes effect once someone later performs
-the real, manual steps in "Future Neon creation and migration procedure" and
-"Future Vercel deployment procedure" below.
+connection string for migrations). This has since been carried out: a live
+public demo now runs on this architecture - see "Verified public deployment"
+below for confirmation, and the README's
+[Live Demo](../README.md#live-demo) section for the URL and evaluator
+walkthrough. The rest of this document, including the procedure below,
+remains accurate as a description of the architecture and as reusable
+reference for repeating or extending the deployment.
 
 ## Architecture
 
@@ -232,7 +234,28 @@ detail, not an application bug and not expected to affect a real Neon
 deployment (which uses ordinary internet routing to a real hostname, not a
 Windows/Docker Desktop loopback port-forward).
 
-## Future Neon creation and migration procedure (not executed by this feature)
+## Verified public deployment
+
+The public demo described in the README's [Live Demo](../README.md#live-demo)
+section has been deployed and externally verified, from both desktop and
+mobile clients:
+
+- Deployment to Vercel succeeded.
+- `GET /health` returned `200`.
+- `GET /ready` returned `200`.
+- The Web UI loaded and worked correctly.
+- Authenticated task CRUD worked correctly.
+- The agent clarification flow worked correctly.
+- The destructive-action confirmation flow worked correctly.
+- Run history persisted correctly across requests.
+- External verification from a mobile client succeeded, in addition to
+  desktop.
+
+No credentials, keys, or connection strings are recorded here — see
+"API-key strategy" above for how the demo key is distributed, and
+"Environment variables" above for what's configured where.
+
+## Neon creation and migration procedure (reference; already performed for the live demo)
 
 1. Create a free Neon project/database via Neon's dashboard.
 2. Copy both connection strings Neon provides: the **pooled** one (hostname
@@ -244,9 +267,10 @@ Windows/Docker Desktop loopback port-forward).
 4. Configure Vercel's **Production** environment variables only (see
    "Environment variables" above). `MIGRATION_DATABASE_URL`/`MIGRATION_MODE`
    are never set here.
-5. Deploy (not performed by this feature).
+5. Deploy.
 6. Verify `/health`, `/ready`, the Web UI, and that protected routes still
-   return 401 without a key - against the real deployment.
+   return 401 without a key - against the real deployment. (For the live
+   demo, see "Verified public deployment" above for the result.)
 7. Retiring the demo later: rotate/delete the demo API key, and optionally
    suspend/delete the Neon project and Vercel deployment.
 

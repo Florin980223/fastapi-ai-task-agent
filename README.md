@@ -7,6 +7,58 @@ Tasks are persisted in SQLite via SQLAlchemy. It also has a small
 rule-based agent (`/agent/...`) that can optionally use Claude to
 pick which tool to run — see Configuration below.
 
+## Live Demo
+
+A public demo is deployed at:
+
+**https://fastapi-ai-task-agent-demo.vercel.app**
+
+Access requires a disposable API key, supplied separately (out-of-band —
+never in this repository). If you're evaluating this project and don't
+have a key yet, ask for one.
+
+**Evaluator walkthrough:**
+
+1. Open the live demo URL above.
+2. Enter the separately-supplied API key when prompted.
+3. Create and manage a few fictional tasks.
+4. Switch to the Agent tab and try a request — including something
+   ambiguous (to see a clarifying question) and something destructive
+   like a delete (to see the confirmation flow).
+5. Check the Run History tab to see the recorded run traces.
+
+**Deployed architecture:**
+
+```
+Browser Web UI → Vercel FastAPI Function → Neon PostgreSQL
+```
+
+- `rule_based` agent decision provider — no paid or external AI API is
+  used in the public demo.
+- A pooled runtime database connection to Neon (serverless-friendly
+  connection pooling).
+- Schema managed by explicit Alembic migrations, run by hand through a
+  separate direct database connection — never applied automatically at
+  runtime.
+- API-key isolation: each key is its own user, and tasks, conversations,
+  and agent run traces never cross keys.
+- Persistent PostgreSQL storage for tasks, conversation state, and agent
+  run history.
+
+**Public-demo limitations:**
+
+- This is a demonstration project, not a production SaaS.
+- The API key is shared separately, out-of-band — it is not self-serve.
+- Please use fictional data only.
+- There is no global/distributed rate limiter — only a best-effort,
+  per-instance one.
+- Cold starts may occur (Vercel and Neon both scale to zero when idle).
+- No Anthropic or other paid AI API is used — the demo runs the
+  rule-based agent only.
+- Destructive actions (e.g. deleting a task) require explicit
+  confirmation before they take effect.
+- Preview deployments intentionally receive no production secrets.
+
 ## Setup
 
 ```bash
@@ -849,14 +901,14 @@ and safe stop/reset/cleanup commands.
 
 ## Vercel + Neon compatibility
 
-This app is prepared (not deployed) for a future zero-cost public demo on
-Vercel Hobby + Neon PostgreSQL Free — a minimal entrypoint adapter
+This app is deployed as a zero-cost public demo on Vercel Hobby + Neon
+PostgreSQL Free — see **[Live Demo](#live-demo)** above for the URL and
+evaluator walkthrough. The deployment uses a minimal entrypoint adapter
 (`app/index.py`), an opt-in serverless connection-pool mode
 (`DB_POOL_MODE=serverless`), and a strict separation between the runtime's
-pooled Neon URL and a migration-only direct URL. No Vercel project, Neon
-project, or deployment has been created. See
+pooled Neon URL and a migration-only direct URL. See
 **[docs/VERCEL.md](docs/VERCEL.md)** for the full architecture, environment
-variables, and the future (not-yet-executed) deployment procedure.
+variables, the deployment procedure, and the verified-deployment record.
 
 ## Continuous Integration (CI)
 
