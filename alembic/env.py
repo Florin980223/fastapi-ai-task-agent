@@ -9,7 +9,18 @@ Python process) and otherwise falls back to app.config.DATABASE_URL -
 the exact same environment variable / .env file the application itself
 reads via app/config.py, so there is exactly one place a database URL
 is ever configured. Running `python -m alembic ...` from the repo root
-therefore targets exactly what `uvicorn app.main:app` would target.
+therefore targets exactly what `uvicorn app.main:app` would target - for
+every local, Docker, and CI Alembic invocation, none of which ever set
+MIGRATION_MODE, this remains true unchanged.
+
+For a future Neon deployment (see docs/VERCEL.md), setting
+MIGRATION_MODE=production requires MIGRATION_DATABASE_URL (the direct,
+non-pooled connection string) to also be set, and uses it instead of
+DATABASE_URL - see app.services.db_url_safety.resolve_migration_url(),
+which also refuses a pooled URL and enforces sslmode=require for any
+non-local host. MIGRATION_DATABASE_URL is read only here, never by
+app/config.py, app/database.py, or app/main.py - the running
+application never receives or uses it.
 
 Importing app.db_models registers all four ORM classes (Task, AgentRun,
 AgentRunStep, ConversationState) on Base.metadata before it's used as
@@ -38,6 +49,8 @@ whatever logging configuration is already active in the process (the
 app's own, when invoked that way; Python's default otherwise).
 """
 
+import os
+
 from sqlalchemy import engine_from_config, pool
 
 from alembic import context
@@ -54,9 +67,15 @@ def _get_url() -> str:
     url = config.get_main_option("sqlalchemy.url")
     if url:
         return url
-    from app.config import DATABASE_URL
 
-    return DATABASE_URL
+    from app.config import DATABASE_URL
+    from app.services.db_url_safety import resolve_migration_url
+
+    return resolve_migration_url(
+        os.environ.get("MIGRATION_MODE"),
+        os.environ.get("MIGRATION_DATABASE_URL"),
+        DATABASE_URL,
+    )
 
 
 def run_migrations_offline() -> None:

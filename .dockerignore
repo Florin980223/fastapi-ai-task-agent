@@ -14,6 +14,7 @@ venv/
 .env
 .env.docker
 .env.demo
+.env.vercel
 .env.*.local
 
 # Local databases - the real dev DB must never enter the build context
@@ -32,6 +33,10 @@ compose.yaml
 compose.demo.yaml
 docker/smoke_test.ps1
 docker-data/
+
+# Vercel-only files/local CLI state - never needed inside the Docker image
+vercel.json
+.vercel/
 
 # Misc
 README.md

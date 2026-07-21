@@ -1,0 +1,10 @@
+{
+  "functions": {
+    "app/index.py": {
+      "excludeFiles": "{tests,evals,docker,docs,.claude,venv,.venv,.github}/**"
+    }
+  },
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/app/index.py" }
+  ]
+}

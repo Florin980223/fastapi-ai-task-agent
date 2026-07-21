@@ -847,6 +847,17 @@ without touching your real `tasks.db` or the normal `agent_data`/
 **[docs/LOCAL_DEMO.md](docs/LOCAL_DEMO.md)** for setup, the full walkthrough,
 and safe stop/reset/cleanup commands.
 
+## Vercel + Neon compatibility
+
+This app is prepared (not deployed) for a future zero-cost public demo on
+Vercel Hobby + Neon PostgreSQL Free — a minimal entrypoint adapter
+(`app/index.py`), an opt-in serverless connection-pool mode
+(`DB_POOL_MODE=serverless`), and a strict separation between the runtime's
+pooled Neon URL and a migration-only direct URL. No Vercel project, Neon
+project, or deployment has been created. See
+**[docs/VERCEL.md](docs/VERCEL.md)** for the full architecture, environment
+variables, and the future (not-yet-executed) deployment procedure.
+
 ## Continuous Integration (CI)
 
 GitHub Actions (`.github/workflows/ci.yml`) runs three independent jobs on

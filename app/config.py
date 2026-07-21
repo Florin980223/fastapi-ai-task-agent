@@ -290,3 +290,24 @@ RATE_LIMIT_WINDOW_SECONDS = _parse_positive_int(
 READY_CHECK_TIMEOUT_SECONDS = _parse_positive_float(
     "READY_CHECK_TIMEOUT_SECONDS", os.environ.get("READY_CHECK_TIMEOUT_SECONDS", "2.0")
 )
+
+# Selects the SQLAlchemy engine/pool shape app.database.py builds - see
+# that module's _build_engine(). "default" (the only value every local,
+# Docker, and CI environment ever uses) is exactly today's existing
+# behavior, completely unchanged. "serverless" is strictly opt-in, for a
+# future Vercel + Neon deployment only - see docs/VERCEL.md.
+_VALID_DB_POOL_MODES = {"default", "serverless"}
+DB_POOL_MODE = os.environ.get("DB_POOL_MODE", "default").strip().lower()
+if DB_POOL_MODE not in _VALID_DB_POOL_MODES:
+    raise HardeningConfigError(f"DB_POOL_MODE must be one of {sorted(_VALID_DB_POOL_MODES)}, got {DB_POOL_MODE!r}.")
+
+# A read-only-except-/tmp serverless filesystem cannot safely run
+# SQLite - a cold start's /tmp is empty (silent data loss) and any path
+# outside /tmp simply can't be written to. Fail fast and loudly here
+# rather than let this surface later as a confusing runtime I/O error.
+if DB_POOL_MODE == "serverless" and DATABASE_URL.startswith("sqlite"):
+    raise HardeningConfigError(
+        "DB_POOL_MODE=serverless cannot be combined with a sqlite:// DATABASE_URL - "
+        "a serverless filesystem cannot safely persist SQLite data. Use a PostgreSQL "
+        "DATABASE_URL instead."
+    )

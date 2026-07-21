@@ -7,4 +7,6 @@ tasks.db
 evals/reports/
 .env.docker
 .env.demo
+.env.vercel
+.vercel/
 docker-data/
