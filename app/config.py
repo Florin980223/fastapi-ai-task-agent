@@ -282,3 +282,11 @@ RATE_LIMIT_REQUESTS = _parse_positive_int(
 RATE_LIMIT_WINDOW_SECONDS = _parse_positive_int(
     "RATE_LIMIT_WINDOW_SECONDS", os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "60")
 )
+
+# Upper bound, in seconds, on how long GET /ready's database/schema check
+# may run before the endpoint reports "not ready" rather than hanging -
+# see app/services/readiness.py. Deliberately small: a readiness probe
+# should fail fast, not block an orchestrator's health check loop.
+READY_CHECK_TIMEOUT_SECONDS = _parse_positive_float(
+    "READY_CHECK_TIMEOUT_SECONDS", os.environ.get("READY_CHECK_TIMEOUT_SECONDS", "2.0")
+)

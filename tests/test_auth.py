@@ -36,6 +36,14 @@ _PUBLIC_ENDPOINTS = [
     ("GET", "/agent/tools"),
 ]
 
+# GET /ready is also unauthenticated (see app/main.py), but deliberately
+# not added to _PUBLIC_ENDPOINTS above: unlike every endpoint in that
+# list, its status code is database-state-dependent (200 when ready, 503
+# when not) rather than an unconditional 200, so it doesn't fit
+# test_public_endpoints_do_not_require_a_key's blanket assertion below.
+# Its no-auth-required behavior is covered instead by
+# tests/test_readiness.py::test_ready_endpoint_does_not_require_an_api_key.
+
 
 @pytest.mark.parametrize("method,path,body", _PROTECTED_ENDPOINTS)
 def test_missing_api_key_is_rejected(unauthenticated_client, method, path, body):

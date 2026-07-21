@@ -205,7 +205,8 @@ or http://127.0.0.1:8000/ for the browser demo UI — see "Web UI" below.
 
 ## Endpoints
 
-- `GET /health` — check that the server is running.
+- `GET /health` — liveness only: is the process alive and responsive. Never touches the database.
+- `GET /ready` — readiness: database connectivity, Alembic schema revision, and required configuration, within a small bounded timeout. `200` when ready, `503` otherwise. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)'s "Health vs. readiness" section for the precise semantics.
 - `GET /tasks` — list all tasks.
 - `POST /tasks` — create a task. Body: `{"title": "Buy milk", "description": "2 liters"}`
 - `PATCH /tasks/{task_id}/done` — mark a task as done.
@@ -805,11 +806,12 @@ recreates the container).
 - The published port is bound to `127.0.0.1` only — not exposed to
   your LAN by default.
 - This stage intentionally has no HTTPS/TLS termination, reverse
-  proxy, or production secrets manager — it's a local demo/dev setup,
-  not a deployment-ready configuration. A lightweight per-user,
-  single-process request-rate guard does exist (see "Reliability &
-  request handling" above) — it's a basic abuse/accident guard, not a
-  substitute for real perimeter security.
+  proxy, or production secrets manager — it's a local demo/dev setup.
+  See [Deployment](#deployment) below for what's needed to run this as
+  a real deployment. A lightweight per-user, single-process
+  request-rate guard does exist (see "Reliability & request handling"
+  above) — it's a basic abuse/accident guard, not a substitute for real
+  perimeter security.
 - Every response (API and the Web UI alike) carries `X-Content-Type-Options:
   nosniff`, `Referrer-Policy: no-referrer`, and `X-Frame-Options: DENY`
   (`app/middleware.py`'s `SecurityHeadersMiddleware`). A strict
@@ -819,6 +821,20 @@ recreates the container).
   which are exempted only because Swagger UI/ReDoc's own default HTML
   loads its JS/CSS from a CDN — those three keep working exactly as
   before.
+
+## Deployment
+
+The setup above (SQLite, single `.env`/`.env.docker`, `docker compose up`) is
+a local dev/demo workflow. For a real, public-facing deployment — required
+environment variables, PostgreSQL setup, the explicit `alembic upgrade head`
+step, health vs. readiness (`GET /health` vs. the new `GET /ready`), the
+single-worker limitation, secret handling, logs, backup-before-migration,
+rollback, database persistence, safe shutdown, troubleshooting, and
+post-deploy smoke testing — see **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
+
+This project stays platform-neutral: the runbook does not assume any
+specific cloud provider, container orchestrator, Redis, Celery, or paid
+service — those remain deliberately out of scope.
 
 ## Continuous Integration (CI)
 
