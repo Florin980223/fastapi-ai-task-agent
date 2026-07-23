@@ -25,24 +25,27 @@ function setStatus(el, message, tone) {
 }
 
 function describeError(err) {
+  // Backend-supplied string details are already complete, human-friendly
+  // sentences (see app/services/agent_service.py's _execute_* helpers) -
+  // pass those through unchanged. Anything else (a non-string detail like
+  // a raw validation-error object, or no detail at all) never gets shown
+  // to the user as JSON - only a plain, generic sentence for that status.
   if (err && err.name === "ApiError") {
-    const parts = [];
-    if (typeof err.detail === "string") {
-      parts.push(err.detail);
-    } else if (err.detail) {
-      parts.push(JSON.stringify(err.detail));
-    } else {
-      parts.push("Request failed.");
+    if (typeof err.detail === "string" && err.detail.trim()) {
+      return err.detail;
+    }
+    if (err.status === 401) {
+      return "Your session isn't valid. Please sign in again.";
     }
     if (err.status === 429) {
-      parts.push("Please slow down and try again shortly.");
+      return "You're sending requests too quickly. Please slow down and try again shortly.";
     }
-    if (err.requestId) {
-      parts.push(`(Request ID: ${err.requestId})`);
+    if (err.status >= 500) {
+      return "Something went wrong on our end. Please try again.";
     }
-    return parts.join(" ");
+    return "That request couldn't be processed. Please check your input and try again.";
   }
-  return "Something went wrong.";
+  return "Something went wrong. Please try again.";
 }
 
 // ---------------------------------------------------------------------
@@ -380,24 +383,67 @@ agentNewConversationBtn.addEventListener("click", () => {
   agentMessageInput.focus();
 });
 
-function renderAgentResponse(response) {
-  agentResult.innerHTML = "";
+// Clean, non-technical headline for each tool's *successful* result. Only
+// reached when response.result has no "error" key - see renderAgentResponse.
+const TOOL_SUCCESS_HEADLINES = {
+  create_task: "Task created",
+  mark_task_done: "Task completed",
+  update_task: "Task updated",
+  delete_task: "Task deleted",
+};
 
-  const answer = document.createElement("p");
-  answer.className = "agent-answer";
-  answer.textContent = response.final_answer;
-  agentResult.appendChild(answer);
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
-  if (response.selected_tool) {
-    const tool = document.createElement("p");
-    tool.textContent = `Tool selected: ${response.selected_tool}`;
-    agentResult.appendChild(tool);
-  }
+function appendHeadline(container, text) {
+  const heading = document.createElement("h3");
+  heading.className = "agent-headline";
+  heading.textContent = text;
+  container.appendChild(heading);
+  return heading;
+}
+
+function appendDetail(container, text, tone) {
+  if (!text) return null;
+  const detail = document.createElement("p");
+  detail.className = "agent-detail";
+  if (tone) detail.dataset.tone = tone;
+  detail.textContent = text;
+  container.appendChild(detail);
+  return detail;
+}
+
+// Collapsed-by-default technical/debugging information: internal tool
+// name, run id, backend reason, raw result JSON, and multi-step data.
+// Never shown by default - only on explicit user disclosure.
+function appendTechnicalDetails(container, response) {
+  const details = document.createElement("details");
+  details.className = "agent-technical-details";
+
+  const summary = document.createElement("summary");
+  summary.textContent = "Technical details";
+  details.appendChild(summary);
+
+  const fields = document.createElement("dl");
+  const addField = (term, value) => {
+    if (value === null || value === undefined || value === "") return;
+    const dt = document.createElement("dt");
+    dt.textContent = term;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    fields.appendChild(dt);
+    fields.appendChild(dd);
+  };
+  addField("Tool", response.selected_tool);
+  addField("Run ID", response.run_id);
+  addField("Reason", response.reason);
+  if (fields.childElementCount > 0) details.appendChild(fields);
 
   if (response.result !== null && response.result !== undefined) {
     const pre = document.createElement("pre");
     pre.textContent = JSON.stringify(response.result, null, 2);
-    agentResult.appendChild(pre);
+    details.appendChild(pre);
   }
 
   if (response.is_multi_step && response.steps && response.steps.length > 0) {
@@ -408,13 +454,84 @@ function renderAgentResponse(response) {
       li.textContent = `Step ${step.step}: ${step.tool} — ${step.status}` + (step.error ? ` (${step.error})` : "");
       stepList.appendChild(li);
     }
-    agentResult.appendChild(stepList);
+    details.appendChild(stepList);
   }
 
-  const runInfo = document.createElement("p");
-  runInfo.className = "request-id";
-  runInfo.textContent = `Run ID: ${response.run_id}`;
-  agentResult.appendChild(runInfo);
+  container.appendChild(details);
+}
+
+function renderAgentResponse(response) {
+  agentResult.innerHTML = "";
+
+  const resultError = isPlainObject(response.result) && typeof response.result.error === "string" ? response.result.error : null;
+
+  if (resultError) {
+    // selected_tool may still be set here (e.g. a stale/expired
+    // confirmation) - a result carrying an error is never treated as a
+    // tool-specific success, regardless of which tool was selected.
+    appendHeadline(agentResult, "Couldn't complete that");
+    appendDetail(agentResult, resultError, "error");
+  } else if (response.needs_clarification && response.clarification_options && response.clarification_options.length > 0) {
+    appendHeadline(agentResult, "I found multiple matching tasks.");
+    appendDetail(agentResult, "Which one did you mean?");
+
+    const options = document.createElement("div");
+    options.className = "agent-options";
+    for (const option of response.clarification_options) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "btn btn-secondary";
+      button.textContent = option.title;
+      // Sends the unambiguous numeric id - never guesses by title text.
+      button.addEventListener("click", () => sendAgentMessage(String(option.task_id)));
+      options.appendChild(button);
+    }
+    agentResult.appendChild(options);
+  } else if (response.needs_clarification) {
+    // No candidates to choose from (missing argument, or no title match
+    // at all) - the backend's question is already a plain, human sentence.
+    appendHeadline(agentResult, response.clarification_question);
+  } else if (response.needs_confirmation) {
+    // Rendered exactly as the backend sent it - never parsed/reconstructed
+    // client-side. Confirm/Cancel just send the same "yes"/"no" replies a
+    // typed response already would.
+    appendHeadline(agentResult, response.confirmation_question);
+
+    const actions = document.createElement("div");
+    actions.className = "agent-confirm-actions";
+    const confirmBtn = document.createElement("button");
+    confirmBtn.type = "button";
+    confirmBtn.className = "btn btn-danger";
+    confirmBtn.textContent = "Confirm";
+    confirmBtn.addEventListener("click", () => sendAgentMessage("yes"));
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "btn btn-secondary";
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.addEventListener("click", () => sendAgentMessage("no"));
+    actions.appendChild(confirmBtn);
+    actions.appendChild(cancelBtn);
+    agentResult.appendChild(actions);
+  } else if (response.selected_tool && TOOL_SUCCESS_HEADLINES[response.selected_tool]) {
+    appendHeadline(agentResult, TOOL_SUCCESS_HEADLINES[response.selected_tool]);
+
+    const newTitle = isPlainObject(response.result) && typeof response.result.title === "string" ? response.result.title : null;
+    if (response.selected_tool === "update_task" && response.resolved_task_title && newTitle) {
+      appendDetail(agentResult, `${response.resolved_task_title} → ${newTitle}`);
+    } else if (newTitle) {
+      appendDetail(agentResult, newTitle);
+    } else if (response.resolved_task_title) {
+      appendDetail(agentResult, response.resolved_task_title);
+    } else if (isPlainObject(response.result) && response.result.task_id !== undefined) {
+      appendDetail(agentResult, `Task #${response.result.task_id}`);
+    }
+  } else {
+    // list_tasks, get_weather, not_implemented, unknown intent - the
+    // backend's final_answer is already clean, human-readable prose.
+    appendHeadline(agentResult, response.final_answer);
+  }
+
+  appendTechnicalDetails(agentResult, response);
 }
 
 function enterPendingReplyMode(question) {
@@ -423,12 +540,12 @@ function enterPendingReplyMode(question) {
   agentMessageInput.value = "";
 }
 
-agentForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
+// Shared by the form's own submit, the Confirm/Cancel buttons, and the
+// clarification-option buttons - all three are just different ways of
+// sending a message into the same conversation, with identical
+// in-flight/status/error/task-refresh handling.
+async function sendAgentMessage(message) {
   if (agentRequestInFlight) return;
-
-  const message = agentMessageInput.value.trim();
-  if (!message) return;
 
   agentRequestInFlight = true;
   agentSubmit.disabled = true;
@@ -460,6 +577,13 @@ agentForm.addEventListener("submit", async (event) => {
     agentSubmit.disabled = false;
     agentMessageInput.focus();
   }
+}
+
+agentForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const message = agentMessageInput.value.trim();
+  if (!message) return;
+  await sendAgentMessage(message);
 });
 
 // ---------------------------------------------------------------------

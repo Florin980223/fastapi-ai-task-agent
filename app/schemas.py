@@ -112,6 +112,17 @@ class ExecuteResponse(BaseModel):
     message: str
     selected_tool: str | None = None
     result: dict | list | None = None
+    # The acted-on (or about-to-be-acted-on) task's title, when known
+    # independently of `result` - the PRE-update title for update_task
+    # (result.title already has the new one), or the target task's title
+    # for mark_task_done/delete_task (delete_task's result never contains
+    # a title at all). Populated whenever the task was resolved by title
+    # or looked up from an explicit id (see routes/agent.py) - optional
+    # presentation metadata only, never affects which task is acted on.
+    # Left None for create_task (result.title already has the created
+    # title), for tools with no task target, and whenever no task could
+    # be found.
+    resolved_task_title: str | None = None
     reason: str
     final_answer: str
     needs_clarification: bool = False

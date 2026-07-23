@@ -35,6 +35,7 @@ from app.services import (
     conversation_memory,
     rate_limiter,
     task_resolution,
+    task_service,
     tool_schemas,
 )
 from app.services.auth import AuthenticatedUser, get_current_user
@@ -80,6 +81,24 @@ def get_run(run_id: uuid.UUID, db: Session = Depends(get_db), current_user: Auth
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
     return run
+
+
+def _lookup_existing_task_title(db: Session, user_id: str, decision: ToolDecision) -> str | None:
+    """Best-effort title lookup for a decision that already carries an
+    explicit task_id (never for a task_title reference - that's already
+    handled by task_resolution.resolve_task_title_argument, which also
+    resolves the title). Used only to populate
+    ExecuteResponse.resolved_task_title as optional display context -
+    never affects which task actually gets acted on, since execution
+    always reads decision.arguments["task_id"] directly.
+    """
+    if decision.selected_tool not in ("mark_task_done", "update_task", "delete_task"):
+        return None
+    task_id = decision.arguments.get("task_id")
+    if task_id is None:
+        return None
+    task = task_service.find_task(db, user_id, task_id)
+    return task.title if task is not None else None
 
 
 @router.post("/execute", response_model=ExecuteResponse)
@@ -160,6 +179,9 @@ def execute(
                     reason=consumed.reason,
                 )
                 tool_schemas.validate_tool_call(decision.selected_tool, decision.arguments)
+                # Looked up before execute_tool runs - delete_task removes
+                # the row, so the title would be gone afterwards.
+                consumed_resolved_task_title = _lookup_existing_task_title(db, user_id, decision)
                 step_started = time.monotonic()
                 result = agent_service.execute_tool(decision, db, user_id)
                 single_step_duration_ms = int((time.monotonic() - step_started) * 1000)
@@ -172,6 +194,7 @@ def execute(
                     message=message,
                     selected_tool=decision.selected_tool,
                     result=result,
+                    resolved_task_title=consumed_resolved_task_title,
                     reason=decision.reason,
                     final_answer=final_answer,
                     needs_clarification=False,
@@ -331,7 +354,22 @@ def execute(
         # below (so an ambiguous/not-found delete-by-title can never
         # reach it - see tests/test_agent_execute.py).
         resolution_outcome = task_resolution.resolve_task_title_argument(decision, db, user_id)
-        resolved_task_title = resolution_outcome.title if resolution_outcome.status == "resolved" else None
+        # title_resolved_task_title is None whenever task_id came from an
+        # explicit reference rather than a title match - this is the exact,
+        # pre-existing value clarification.build_confirmation_question
+        # takes below, and its wording (with vs. without a named title) must
+        # stay byte-identical to before for an explicit task_id (see
+        # tests/test_confirmation.py's plain "delete task #N?" wording).
+        title_resolved_task_title = resolution_outcome.title if resolution_outcome.status == "resolved" else None
+        # resolved_task_title is the broader value ExecuteResponse exposes:
+        # the same title-resolved value, or - only when that's absent - a
+        # best-effort lookup from an explicit task_id, purely as optional
+        # display context (see _lookup_existing_task_title). Never fed into
+        # build_confirmation_question, so confirmation wording/safety never
+        # depends on it.
+        resolved_task_title = title_resolved_task_title
+        if resolved_task_title is None:
+            resolved_task_title = _lookup_existing_task_title(db, user_id, decision)
         if resolution_outcome.status in ("ambiguous", "not_found"):
             if resolution_outcome.status == "ambiguous":
                 candidates = list(resolution_outcome.candidates)
@@ -444,7 +482,7 @@ def execute(
         # Destructive tools don't execute yet - park the decision and ask
         # the user to explicitly confirm it first.
         if clarification.requires_confirmation(decision.selected_tool):
-            question = clarification.build_confirmation_question(decision, resolved_task_title)
+            question = clarification.build_confirmation_question(decision, title_resolved_task_title)
             try:
                 conversation_memory.set_confirmation(
                     db,
@@ -480,6 +518,7 @@ def execute(
                 message=message,
                 selected_tool=decision.selected_tool,
                 result=None,
+                resolved_task_title=resolved_task_title,
                 reason=decision.reason,
                 final_answer=question,
                 needs_clarification=False,
@@ -503,6 +542,7 @@ def execute(
             message=message,
             selected_tool=decision.selected_tool,
             result=result,
+            resolved_task_title=resolved_task_title,
             reason=decision.reason,
             final_answer=final_answer,
             needs_clarification=False,

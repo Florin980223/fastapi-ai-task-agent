@@ -291,8 +291,28 @@ main {
   display: none;
 }
 
-.agent-answer {
+.agent-headline {
+  margin: 0 0 var(--space-1);
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.agent-detail {
+  margin: 0 0 var(--space-2);
+  color: var(--color-text-muted);
+}
+
+.agent-detail[data-tone="error"] {
+  color: var(--color-danger);
   font-weight: 600;
+}
+
+.agent-options,
+.agent-confirm-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin: var(--space-2) 0;
 }
 
 .agent-step-list {
@@ -310,9 +330,40 @@ main {
   padding: var(--space-2);
 }
 
-.request-id {
+.agent-technical-details {
+  margin-top: var(--space-3);
   color: var(--color-text-muted);
-  font-size: 0.85rem;
+  font-size: 0.9rem;
+}
+
+.agent-technical-details summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.agent-technical-details dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1) var(--space-2);
+  margin: var(--space-2) 0;
+}
+
+.agent-technical-details dt {
+  font-weight: 600;
+}
+
+.agent-technical-details dd {
+  margin: 0;
+  word-break: break-all;
+}
+
+.agent-technical-details pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: var(--space-2);
 }
 
 .history-layout {

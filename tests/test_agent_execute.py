@@ -296,6 +296,109 @@ def test_update_task_by_explicit_id_to_new_title_containing_q3(client):
     assert data["result"]["title"] == "Prepare Q3 report"
 
 
+# --- resolved_task_title (structured presentation metadata) -------------
+
+
+def test_update_by_title_returns_old_title_in_resolved_task_title(client):
+    _execute(client, "Add a task to Prepare final portfolio")
+
+    data = _execute(client, "Rename the portfolio task to Prepare Q3 report")
+
+    assert data["resolved_task_title"] == "Prepare final portfolio"
+    assert data["result"]["title"] == "Prepare Q3 report"
+
+
+def test_update_by_explicit_id_returns_old_title_in_resolved_task_title(client):
+    created = _execute(client, "Add a task to Prepare final portfolio")
+    task_id = created["result"]["id"]
+
+    data = _execute(client, f"Rename task {task_id} to Prepare Q3 report")
+
+    assert data["resolved_task_title"] == "Prepare final portfolio"
+    assert data["result"]["title"] == "Prepare Q3 report"
+
+
+def test_mark_done_by_title_returns_selected_title_in_resolved_task_title(client):
+    _execute(client, "Add a task to Prepare client presentation")
+
+    data = _execute(client, "Mark the client presentation task as done")
+
+    assert data["resolved_task_title"] == "Prepare client presentation"
+    assert data["result"]["title"] == "Prepare client presentation"
+
+
+def test_mark_done_by_explicit_id_returns_selected_title_in_resolved_task_title(client):
+    created = _execute(client, "Add a task to Prepare client presentation")
+    task_id = created["result"]["id"]
+
+    data = _execute(client, f"Mark task {task_id} as done")
+
+    assert data["resolved_task_title"] == "Prepare client presentation"
+
+
+def test_delete_confirmation_carries_resolved_task_title(client):
+    _execute(client, "Add a task to Temporary customer test")
+
+    asked = _execute(client, "Delete the temporary customer test task")
+
+    assert asked["needs_confirmation"] is True
+    assert asked["resolved_task_title"] == "Temporary customer test"
+
+    data = _execute(client, "yes", conversation_id=asked["conversation_id"])
+
+    assert data["result"]["status"] == "deleted"
+    assert data["resolved_task_title"] == "Temporary customer test"
+
+
+def test_delete_confirmation_by_explicit_id_carries_resolved_task_title(client):
+    created = _execute(client, "Add a task to Temporary customer test")
+    task_id = created["result"]["id"]
+
+    asked = _execute(client, f"Delete task {task_id}")
+
+    assert asked["needs_confirmation"] is True
+    assert asked["resolved_task_title"] == "Temporary customer test"
+
+    data = _execute(client, "yes", conversation_id=asked["conversation_id"])
+
+    assert data["result"]["status"] == "deleted"
+    assert data["resolved_task_title"] == "Temporary customer test"
+
+
+def test_create_task_leaves_resolved_task_title_null(client):
+    data = _execute(client, "Add a task to Prepare customer onboarding")
+
+    assert data["resolved_task_title"] is None
+    assert data["result"]["title"] == "Prepare customer onboarding"
+
+
+def test_existing_execute_response_consumers_are_backward_compatible(client):
+    # A pre-existing caller that only reads the original ExecuteResponse
+    # fields must see no change in their values or presence - the new
+    # resolved_task_title field is purely additive.
+    data = _execute(client, "Add a task to buy milk")
+
+    assert set(data.keys()) >= {
+        "run_id",
+        "conversation_id",
+        "message",
+        "selected_tool",
+        "result",
+        "reason",
+        "final_answer",
+        "needs_clarification",
+        "clarification_question",
+        "clarification_options",
+        "needs_confirmation",
+        "confirmation_question",
+        "is_multi_step",
+        "steps",
+    }
+    assert data["selected_tool"] == "create_task"
+    assert data["result"]["title"] == "buy milk"
+    assert data["final_answer"]
+
+
 def test_digit_based_flows_are_unaffected_by_title_resolution(client, monkeypatch):
     from app.services import task_service
 
