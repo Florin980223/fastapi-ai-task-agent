@@ -83,6 +83,15 @@ class ExecuteRequest(BaseModel):
     conversation_id: uuid.UUID | None = None
 
 
+class ClarificationOptionResponse(BaseModel):
+    """One concrete candidate task offered when a title reference matches
+    more than one of the user's own tasks (see app/services/task_resolution.py).
+    """
+
+    task_id: int
+    title: str
+
+
 class StepResultResponse(BaseModel):
     """Shape of a single entry in ExecuteResponse.steps."""
 
@@ -107,6 +116,7 @@ class ExecuteResponse(BaseModel):
     final_answer: str
     needs_clarification: bool = False
     clarification_question: str | None = None
+    clarification_options: list[ClarificationOptionResponse] | None = None
     needs_confirmation: bool = False
     confirmation_question: str | None = None
     is_multi_step: bool = False

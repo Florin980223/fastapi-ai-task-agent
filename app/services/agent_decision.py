@@ -71,7 +71,7 @@ RULES: list[tuple[str, list[str], str]] = [
     ),
     (
         "update_task",
-        ["update", "edit", "change task"],
+        ["update", "edit", "change task", "rename"],
         "The user wants to update an existing task.",
     ),
     (
@@ -191,6 +191,105 @@ def _extract_task_id(message: str) -> int | None:
     return int(match.group())
 
 
+# Filler phrases stripped (in order) when turning a mark_task_done/
+# delete_task/update_task message into a free-text task reference, e.g.
+# "Mark the client presentation task as done" -> "client presentation".
+# Only ever used when _extract_task_id found no digit (see _build_arguments)
+# - a digit-containing message is unaffected by any of this. Same
+# find-and-remove-each-phrase-in-turn idiom as _extract_task_title's
+# _TASK_TITLE_FILLER_PHRASES; "the <verb>" combos are listed before their
+# bare counterpart so a message with "the" is fully consumed in one pass
+# rather than leaving a stray "the" behind.
+_TASK_REFERENCE_FILLER_PHRASES = [
+    "mark the",
+    "mark",
+    "complete the",
+    "completed",
+    "complete",
+    "finish the",
+    "finished",
+    "finish",
+    "delete the",
+    "delete",
+    "remove the",
+    "remove",
+    "update the",
+    "update",
+    "edit the",
+    "edit",
+    "rename the",
+    "rename",
+    "change the",
+    "change",
+    "as done",
+    "as complete",
+    "as completed",
+    "the task",
+    "task",
+]
+
+# Bare articles, dropped as whole words (never via substring removal,
+# unlike the multi-word phrases above) after filler-phrase stripping, so
+# a message with no real content beyond filler - e.g. "Delete a task",
+# "Mark a task as done" - collapses to no reference at all instead of a
+# stray "a". Word-level comparison specifically avoids the substring bug
+# a bare "a" filler phrase would have: "a" is itself a substring of
+# "task", so a naive .find("a") removal would corrupt "task" into "tsk".
+_REFERENCE_STOPWORDS = {"a", "an", "the"}
+
+
+def _extract_task_reference(message: str) -> str | None:
+    """Pull a free-text reference to an existing task out of a message
+    that has no numeric task id, e.g. "Mark the client presentation task
+    as done" -> "client presentation", or "Delete the old testing task"
+    -> "old testing".
+
+    This is deliberately a best-effort heuristic, not a precise parser:
+    app.services.task_resolution's tiered (exact / containment / fuzzy)
+    matching is forgiving of a slightly over- or under-stripped
+    reference, so perfect extraction here isn't required for correct
+    resolution. Returns None if nothing but filler is left afterwards.
+    """
+    reference = message
+    lowered = message.lower()
+
+    for phrase in _TASK_REFERENCE_FILLER_PHRASES:
+        index = lowered.find(phrase)
+        if index != -1:
+            reference = reference[:index] + reference[index + len(phrase):]
+            lowered = reference.lower()
+
+    reference = reference.strip(" .!?")
+    words = [word for word in reference.split() if word.lower() not in _REFERENCE_STOPWORDS]
+    return " ".join(words) or None
+
+
+def _extract_update_reference_and_title(message: str) -> tuple[str | None, str | None]:
+    """Split a digit-free update_task message into (task reference, new
+    title), e.g. "Rename the portfolio task to Prepare final portfolio"
+    -> ("portfolio", "Prepare final portfolio").
+
+    Anchors on the FIRST " to " in the message (case-insensitive) and
+    takes everything after it as the new title - same convention as the
+    existing digit-anchored _extract_new_title's digit-then-"to" regex
+    (anchor at the earliest separator, then greedily capture the
+    rest), so a new title that itself contains "to" (e.g. "Update the
+    drive task to Talk to Bob" -> new title "Talk to Bob") is still
+    captured in full. Only called when _extract_task_id found no digit -
+    the existing digit-anchored path is tried first and is unaffected by
+    any of this (see _build_arguments). Returns (None, None) if the
+    message has no " to " at all.
+    """
+    lowered = message.lower()
+    index = lowered.find(" to ")
+    if index == -1:
+        return None, None
+
+    reference = _extract_task_reference(message[:index])
+    new_title = message[index + len(" to "):].strip(" .!?") or None
+    return reference, new_title
+
+
 def _extract_new_title(message: str) -> str | None:
     """Pull the new title out of an update_task message.
 
@@ -222,14 +321,22 @@ def _build_arguments(selected_tool: str | None, message: str) -> dict[str, str |
     if selected_tool == "get_weather":
         return {"city": _extract_city(message)}
 
-    if selected_tool == "mark_task_done":
-        return {"task_id": _extract_task_id(message)}
+    if selected_tool in ("mark_task_done", "delete_task"):
+        task_id = _extract_task_id(message)
+        if task_id is not None:
+            # Digit present - unchanged, byte-identical behavior. No
+            # task_title extraction is even attempted: it would be
+            # wasted work, since app.services.task_resolution never
+            # looks at task_title once task_id is present.
+            return {"task_id": task_id}
+        return {"task_id": None, "task_title": _extract_task_reference(message)}
 
     if selected_tool == "update_task":
-        return {"task_id": _extract_task_id(message), "title": _extract_new_title(message)}
-
-    if selected_tool == "delete_task":
-        return {"task_id": _extract_task_id(message)}
+        task_id = _extract_task_id(message)
+        if task_id is not None:
+            return {"task_id": task_id, "title": _extract_new_title(message)}
+        task_title, new_title = _extract_update_reference_and_title(message)
+        return {"task_id": None, "task_title": task_title, "title": new_title}
 
     return {}
 

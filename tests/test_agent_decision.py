@@ -67,6 +67,94 @@ def test_delete_todo_message_is_recognized_as_delete_task():
     assert decision.arguments == {"task_id": 3}
 
 
+def test_mark_task_done_decision_extracts_task_title_when_no_digit():
+    decision = decide_tool("Mark the client presentation task as done")
+
+    assert decision.selected_tool == "mark_task_done"
+    assert decision.arguments == {"task_id": None, "task_title": "client presentation"}
+
+
+def test_mark_task_done_decision_handles_leading_the_and_trailing_task_phrasing():
+    # Regression test for a reported smoke-test failure: a leading "the" and
+    # a trailing "task" before "as done" must still resolve to the same
+    # tool/title extraction as the simpler "Mark X as done" phrasing.
+    decision = decide_tool("Mark the portfolio presentation Omega task as done.")
+
+    assert decision.selected_tool == "mark_task_done"
+    assert decision.arguments == {"task_id": None, "task_title": "portfolio presentation Omega"}
+
+
+def test_mark_task_done_decision_extracts_full_title_without_leading_the():
+    decision = decide_tool("Mark Prepare portfolio presentation Omega as done")
+
+    assert decision.selected_tool == "mark_task_done"
+    assert decision.arguments == {"task_id": None, "task_title": "Prepare portfolio presentation Omega"}
+
+
+def test_mark_task_done_digit_based_behavior_is_unchanged_for_this_scenario():
+    decision = decide_tool("Mark task 9 as done")
+
+    assert decision.selected_tool == "mark_task_done"
+    assert decision.arguments == {"task_id": 9}
+
+
+def test_bare_task_title_with_no_verb_is_unknown_intent():
+    # This is the actual message that produced "I couldn't figure out what
+    # to do with that message" in the real agent_runs trace - a bare task
+    # title with no actionable verb at all, not the "Mark the ... task as
+    # done." sentence the ticket quoted. Confirms this is correct,
+    # unchanged unknown-intent handling, not a bug.
+    decision = decide_tool("Prepare portfolio presentation Omega")
+
+    assert decision.selected_tool is None
+    assert decision.arguments == {}
+
+
+def test_delete_task_decision_extracts_task_title_when_no_digit():
+    decision = decide_tool("Delete the old testing task")
+
+    assert decision.selected_tool == "delete_task"
+    assert decision.arguments == {"task_id": None, "task_title": "old testing"}
+
+
+def test_update_task_decision_extracts_reference_and_new_title_when_no_digit():
+    decision = decide_tool("Rename the portfolio task to Prepare final portfolio")
+
+    assert decision.selected_tool == "update_task"
+    assert decision.arguments == {"task_id": None, "task_title": "portfolio", "title": "Prepare final portfolio"}
+
+
+def test_update_task_new_title_containing_to_is_captured_in_full_without_digit():
+    decision = decide_tool("Update the drive task to Talk to Bob")
+
+    assert decision.selected_tool == "update_task"
+    assert decision.arguments == {"task_id": None, "task_title": "drive", "title": "Talk to Bob"}
+
+
+def test_update_task_with_no_to_separator_and_no_digit_has_none_arguments():
+    decision = decide_tool("Update the portfolio task")
+
+    assert decision.selected_tool == "update_task"
+    assert decision.arguments == {"task_id": None, "task_title": None, "title": None}
+
+
+def test_generic_content_free_message_extracts_no_task_title():
+    # Regression guard: a message with nothing but filler/articles must
+    # collapse to task_title=None, never a stray leftover word like "a".
+    assert decide_tool("Delete a task").arguments == {"task_id": None, "task_title": None}
+    assert decide_tool("Mark a task as done").arguments == {"task_id": None, "task_title": None}
+
+
+def test_digit_in_message_still_takes_priority_over_title_extraction():
+    # Regression pin: a digit-containing message must produce exactly the
+    # same arguments as before this feature existed - no task_title key
+    # at all, since app.services.task_resolution never looks at it once
+    # task_id is present.
+    assert decide_tool("Mark task 1 as done").arguments == {"task_id": 1}
+    assert decide_tool("Delete task 3").arguments == {"task_id": 3}
+    assert decide_tool("Update task 2 to Buy oat milk").arguments == {"task_id": 2, "title": "Buy oat milk"}
+
+
 def test_no_matching_tool_returns_none_selected_tool_and_empty_arguments():
     decision = decide_tool("hello there")
 

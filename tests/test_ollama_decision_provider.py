@@ -215,8 +215,34 @@ def test_ollama_delete_task_schema_keeps_task_id_type():
     assert parameters["properties"]["task_id"]["type"] == "integer"
 
 
-def test_canonical_schema_still_marks_task_id_as_required():
-    # The shared, canonical schema (used by Anthropic and as the source
-    # of truth for clarification) must be untouched by the Ollama-only
-    # schema adjustment.
-    assert tool_schemas.TOOL_ARGUMENT_SCHEMAS["delete_task"]["required"] == ["task_id"]
+def test_canonical_schema_no_longer_hard_requires_task_id_alone():
+    # task_id is no longer the only way to identify a task: delete_task
+    # (like mark_task_done/update_task) also accepts task_title. The
+    # canonical schema (used directly by Anthropic; passed through this
+    # module's own required-stripping above for Ollama) must not claim
+    # task_id is unconditionally required - instead it encodes the OR
+    # relationship via "anyOf" - see app/services/tool_schemas.py.
+    schema = tool_schemas.TOOL_ARGUMENT_SCHEMAS["delete_task"]
+    assert "task_id" not in schema.get("required", [])
+    assert schema["anyOf"] == [{"required": ["task_id"]}, {"required": ["task_title"]}]
+
+
+def test_ollama_tool_schema_includes_task_title_for_scoped_tools():
+    tools = ollama_decision_provider._build_ollama_tools()
+    by_name = {tool["function"]["name"]: tool for tool in tools}
+
+    for tool_name in ("mark_task_done", "update_task", "delete_task"):
+        assert "task_title" in by_name[tool_name]["function"]["parameters"]["properties"]
+
+    for tool_name in ("create_task", "list_tasks", "get_weather"):
+        assert "task_title" not in by_name[tool_name]["function"]["parameters"]["properties"]
+
+
+def test_ollama_decide_tool_accepts_task_title_only_response(monkeypatch):
+    response = _fake_chat_response([_tool_call("mark_task_done", {"task_title": "the portfolio task"})])
+    monkeypatch.setattr(ollama_decision_provider, "_call_ollama", lambda payload: response)
+
+    decision = ollama_decision_provider.decide_tool("Mark the portfolio task as done")
+
+    assert decision.selected_tool == "mark_task_done"
+    assert decision.arguments == {"task_title": "the portfolio task"}

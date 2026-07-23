@@ -11,6 +11,24 @@ the two providers can't silently drift apart on what's "required" or
 # JSON Schema arguments for each executable tool. This is provider-neutral:
 # Anthropic wraps it as a tool's "input_schema", Ollama/OpenAI-style wraps
 # it as a function's "parameters" - the schema itself is identical either way.
+# task_title lets a caller identify a task by name instead of by numeric
+# id, for the three tools in TASK_ID_OR_TITLE_TOOLS below. Exactly one of
+# task_id/task_title is needed - never both required - which is why
+# neither is listed in these three schemas' "required" array; instead
+# each carries an "anyOf" constraint spelling out the OR-relationship, so
+# a schema-aware model is never told task_id is unconditionally mandatory
+# when a title reference is just as valid. app.services.task_resolution
+# resolves task_title into a task_id before anything else (missing-
+# argument checks, validation, execution) ever runs - REQUIRED_ARGUMENTS
+# below is unaffected by this and still says task_id is what execution
+# ultimately needs, since it's only consulted after that resolution step
+# has already had its chance to run.
+_TASK_ID_OR_TITLE_ANY_OF = [{"required": ["task_id"]}, {"required": ["task_title"]}]
+_TASK_TITLE_PROPERTY = {
+    "type": "string",
+    "description": "The task's title, or a short phrase referring to it, if its numeric id is not known.",
+}
+
 TOOL_ARGUMENT_SCHEMAS: dict[str, dict] = {
     "create_task": {
         "type": "object",
@@ -33,21 +51,29 @@ TOOL_ARGUMENT_SCHEMAS: dict[str, dict] = {
     },
     "mark_task_done": {
         "type": "object",
-        "properties": {"task_id": {"type": "integer", "description": "The id of the task to mark done."}},
-        "required": ["task_id"],
+        "properties": {
+            "task_id": {"type": "integer", "description": "The id of the task to mark done."},
+            "task_title": _TASK_TITLE_PROPERTY,
+        },
+        "anyOf": _TASK_ID_OR_TITLE_ANY_OF,
     },
     "update_task": {
         "type": "object",
         "properties": {
             "task_id": {"type": "integer", "description": "The id of the task to update."},
+            "task_title": _TASK_TITLE_PROPERTY,
             "title": {"type": "string", "description": "The new title for the task."},
         },
-        "required": ["task_id", "title"],
+        "required": ["title"],
+        "anyOf": _TASK_ID_OR_TITLE_ANY_OF,
     },
     "delete_task": {
         "type": "object",
-        "properties": {"task_id": {"type": "integer", "description": "The id of the task to delete."}},
-        "required": ["task_id"],
+        "properties": {
+            "task_id": {"type": "integer", "description": "The id of the task to delete."},
+            "task_title": _TASK_TITLE_PROPERTY,
+        },
+        "anyOf": _TASK_ID_OR_TITLE_ANY_OF,
     },
 }
 
@@ -67,6 +93,16 @@ REQUIRED_ARGUMENTS: dict[str, dict[str, type]] = {
 # and agent_planner.py both derive from this instead of each keeping their
 # own copy.
 DESTRUCTIVE_TOOLS: frozenset[str] = frozenset({"delete_task"})
+
+# Name of the alternative-to-task_id argument, above. Single source of
+# truth so callers never hardcode the string.
+TASK_TITLE_ARGUMENT = "task_title"
+
+# Tools that can identify their target task either by task_id or by
+# task_title. Single source of truth - app.services.task_resolution and
+# app.routes.agent both derive from this instead of each keeping their own
+# copy, the same pattern as DESTRUCTIVE_TOOLS above.
+TASK_ID_OR_TITLE_TOOLS: frozenset[str] = frozenset({"mark_task_done", "update_task", "delete_task"})
 
 
 class ToolCallValidationError(Exception):

@@ -149,3 +149,27 @@ def test_argument_validation_failure_is_never_silently_handed_to_rule_based(monk
 
 def test_rule_based_is_the_default_provider():
     assert config.DECISION_PROVIDER == "rule_based"
+
+
+# --- task_title schema/decision support --------------------------------------
+
+
+def test_claude_tool_schema_includes_task_title_for_scoped_tools():
+    tools = anthropic_decision_provider._build_claude_tools()
+    by_name = {tool["name"]: tool for tool in tools}
+
+    for tool_name in ("mark_task_done", "update_task", "delete_task"):
+        assert "task_title" in by_name[tool_name]["input_schema"]["properties"]
+
+    for tool_name in ("create_task", "list_tasks", "get_weather"):
+        assert "task_title" not in by_name[tool_name]["input_schema"]["properties"]
+
+
+def test_decide_tool_accepts_task_title_only_response(monkeypatch):
+    response = _fake_response([_tool_use_block("mark_task_done", {"task_title": "the portfolio task"})])
+    monkeypatch.setattr(anthropic_decision_provider, "_get_client", lambda: _FakeClient(response=response))
+
+    decision = anthropic_decision_provider.decide_tool("Mark the portfolio task as done")
+
+    assert decision.selected_tool == "mark_task_done"
+    assert decision.arguments == {"task_title": "the portfolio task"}

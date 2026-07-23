@@ -27,7 +27,11 @@ _SYSTEM_PROMPT = (
     "Given the user's message, decide which single tool (if any) should handle "
     "it, and call that tool with appropriate arguments. If no tool fits the "
     "message, don't call any tool. Respond only through the provided tool-call "
-    "mechanism - never with plain prose."
+    "mechanism - never with plain prose.\n\n"
+    "When the user refers to a task by its name or a short description "
+    "instead of a numeric id (e.g. \"the client presentation task\"), call "
+    "the tool with task_title set to that description instead of guessing "
+    "or inventing a numeric task_id."
 )
 
 

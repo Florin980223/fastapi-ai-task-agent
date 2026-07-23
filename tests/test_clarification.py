@@ -10,6 +10,9 @@ from types import SimpleNamespace
 import app.services.agent_decision as agent_decision
 import app.services.anthropic_decision_provider as anthropic_decision_provider
 import app.services.ollama_decision_provider as ollama_decision_provider
+from app.services import clarification
+from app.services.conversation_memory import PendingClarification
+from app.services.task_resolution import TaskCandidate
 
 
 def _execute(client, message):
@@ -235,3 +238,92 @@ def test_clarification_state_is_isolated_between_users(client, other_user_header
     assert answered["needs_clarification"] is False
     assert answered["selected_tool"] == "create_task"
     assert answered["result"]["title"] == "Buy milk"
+
+
+# --- Ambiguous title-resolution clarification (unit-level) ------------------
+
+
+def _ambiguous_pending(candidates, tool="delete_task", extra_arguments=None):
+    arguments = {"task_id": None, "task_title": "testing"}
+    if extra_arguments:
+        arguments.update(extra_arguments)
+    arguments[clarification.CLARIFICATION_CANDIDATES_KEY] = [
+        {"task_id": c.task_id, "title": c.title} for c in candidates
+    ]
+    return PendingClarification(selected_tool=tool, arguments=arguments, reason="ambiguous", missing=["task_id"])
+
+
+def test_build_ambiguous_task_question_lists_all_candidates():
+    candidates = [TaskCandidate(task_id=3, title="Client presentation"), TaskCandidate(task_id=7, title="Client presentation slides")]
+    question = clarification.build_ambiguous_task_question(candidates)
+
+    assert "2 tasks" in question
+    assert '#3 "Client presentation"' in question
+    assert '#7 "Client presentation slides"' in question
+
+
+def test_build_not_found_task_question_is_fixed_and_generic():
+    question = clarification.build_not_found_task_question()
+    assert "couldn't find a task" in question
+
+
+def test_is_ambiguous_task_clarification_detects_candidate_list():
+    ambiguous = _ambiguous_pending([TaskCandidate(task_id=1, title="Testing")])
+    ordinary = PendingClarification(selected_tool="delete_task", arguments={"task_id": None}, reason="r", missing=["task_id"])
+
+    assert clarification.is_ambiguous_task_clarification(ambiguous) is True
+    assert clarification.is_ambiguous_task_clarification(ordinary) is False
+
+
+def test_merge_ambiguous_task_reply_resolves_by_list_position():
+    candidates = [TaskCandidate(task_id=3, title="Testing"), TaskCandidate(task_id=7, title="Testing")]
+    pending = _ambiguous_pending(candidates)
+
+    merged = clarification.merge_ambiguous_task_reply(pending, "2")
+
+    assert merged["task_id"] == 7
+    assert clarification.CLARIFICATION_CANDIDATES_KEY not in merged
+    assert "task_title" not in merged
+
+
+def test_merge_ambiguous_task_reply_resolves_by_exact_title_text():
+    candidates = [TaskCandidate(task_id=3, title="Client presentation"), TaskCandidate(task_id=7, title="Team presentation")]
+    pending = _ambiguous_pending(candidates)
+
+    merged = clarification.merge_ambiguous_task_reply(pending, "team presentation")
+
+    assert merged["task_id"] == 7
+
+
+def test_merge_ambiguous_task_reply_resolves_by_task_id_digit():
+    candidates = [TaskCandidate(task_id=3, title="Testing"), TaskCandidate(task_id=7, title="Testing")]
+    pending = _ambiguous_pending(candidates)
+
+    merged = clarification.merge_ambiguous_task_reply(pending, "7")
+
+    assert merged["task_id"] == 7
+
+
+def test_merge_ambiguous_task_reply_unmatched_reply_keeps_clarification_pending():
+    candidates = [TaskCandidate(task_id=3, title="Testing"), TaskCandidate(task_id=7, title="Testing")]
+    pending = _ambiguous_pending(candidates)
+
+    merged = clarification.merge_ambiguous_task_reply(pending, "something unrelated")
+
+    assert merged.get("task_id") is None
+    assert clarification.CLARIFICATION_CANDIDATES_KEY in merged
+
+
+def test_existing_missing_argument_merge_reply_is_unaffected():
+    # Regression pin: ordinary (non-title) clarification merging is
+    # untouched by the ambiguous-title additions above.
+    pending = PendingClarification(selected_tool="create_task", arguments={"title": None}, reason="r", missing=["title"])
+    merged = clarification.merge_reply(pending, "Buy milk")
+    assert merged == {"title": "Buy milk"}
+
+
+def test_merge_reply_still_prefers_digit_reply_for_task_id():
+    pending = PendingClarification(selected_tool="mark_task_done", arguments={"task_id": None}, reason="r", missing=["task_id"])
+    merged = clarification.merge_reply(pending, "3")
+    assert merged["task_id"] == 3
+    assert "task_title" not in merged

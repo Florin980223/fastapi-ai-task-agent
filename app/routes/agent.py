@@ -18,6 +18,7 @@ from app.database import get_db
 from app.schemas import (
     AgentRunDetailResponse,
     AgentRunSummaryResponse,
+    ClarificationOptionResponse,
     DecideToolRequest,
     DecideToolResponse,
     ExecuteRequest,
@@ -25,7 +26,17 @@ from app.schemas import (
     StepResultResponse,
     ToolResponse,
 )
-from app.services import agent_decision, agent_planner, agent_service, agent_trace_service, clarification, conversation_memory, rate_limiter, tool_schemas
+from app.services import (
+    agent_decision,
+    agent_planner,
+    agent_service,
+    agent_trace_service,
+    clarification,
+    conversation_memory,
+    rate_limiter,
+    task_resolution,
+    tool_schemas,
+)
 from app.services.auth import AuthenticatedUser, get_current_user
 from app.services.conversation_memory import PendingClarification, PendingConfirmation
 from app.services.tool_decision import ToolDecision
@@ -200,8 +211,38 @@ def execute(
 
             # A pending clarification exists - parse this reply deterministically
             # and merge it in. No LLM provider is consulted for a bare reply
-            # like "3".
-            merged_arguments = clarification.merge_reply(pending, message)
+            # like "3". An ambiguous-title clarification (carrying a candidate
+            # list) is parsed differently from an ordinary missing-argument
+            # one - see clarification.is_ambiguous_task_clarification.
+            if clarification.is_ambiguous_task_clarification(pending):
+                merged_arguments = clarification.merge_ambiguous_task_reply(pending, message)
+                if clarification.CLARIFICATION_CANDIDATES_KEY in merged_arguments:
+                    # The reply didn't clearly pick one of the candidates -
+                    # keep waiting rather than guessing. Re-ask the same
+                    # question with the same candidates; nothing is
+                    # re-persisted since the pending state is unchanged.
+                    candidates = clarification.candidates_from_pending(pending)
+                    question = clarification.build_ambiguous_task_question(candidates)
+                    response = ExecuteResponse(
+                        run_id=run_id,
+                        conversation_id=conversation_id,
+                        message=message,
+                        selected_tool=pending.selected_tool,
+                        result=None,
+                        reason=pending.reason,
+                        final_answer=question,
+                        needs_clarification=True,
+                        clarification_question=question,
+                        clarification_options=[ClarificationOptionResponse(task_id=c.task_id, title=c.title) for c in candidates],
+                        needs_confirmation=False,
+                        confirmation_question=None,
+                        is_multi_step=False,
+                        steps=[],
+                    )
+                    return response
+            else:
+                merged_arguments = clarification.merge_reply(pending, message)
+
             decision = ToolDecision(
                 selected_tool=pending.selected_tool,
                 arguments=merged_arguments,
@@ -280,6 +321,70 @@ def execute(
         last_task_id = conversation_memory.get_last_task_id(db, user_id, conversation_id)
         clarification.resolve_remembered_task_id(decision, last_task_id, message)
 
+        # Resolve a task_title reference (e.g. "the portfolio task") into
+        # a task_id before anything downstream ever runs. A no-op with no
+        # database query at all whenever task_id is already present (a
+        # digit-containing message, or context-resolved above) - see
+        # task_resolution.resolve_task_title_argument. Must run before
+        # missing_arguments (so a resolved task_id is never reported
+        # missing) and before the destructive-confirmation gate further
+        # below (so an ambiguous/not-found delete-by-title can never
+        # reach it - see tests/test_agent_execute.py).
+        resolution_outcome = task_resolution.resolve_task_title_argument(decision, db, user_id)
+        resolved_task_title = resolution_outcome.title if resolution_outcome.status == "resolved" else None
+        if resolution_outcome.status in ("ambiguous", "not_found"):
+            if resolution_outcome.status == "ambiguous":
+                candidates = list(resolution_outcome.candidates)
+                question = clarification.build_ambiguous_task_question(candidates)
+                stored_arguments = dict(decision.arguments)
+                stored_arguments[clarification.CLARIFICATION_CANDIDATES_KEY] = [
+                    {"task_id": c.task_id, "title": c.title} for c in candidates
+                ]
+                clarification_options = [ClarificationOptionResponse(task_id=c.task_id, title=c.title) for c in candidates]
+            else:
+                question = clarification.build_not_found_task_question()
+                stored_arguments = dict(decision.arguments)
+                clarification_options = None
+
+            try:
+                conversation_memory.set(
+                    db,
+                    user_id,
+                    conversation_id,
+                    PendingClarification(
+                        selected_tool=decision.selected_tool,
+                        arguments=stored_arguments,
+                        reason=decision.reason,
+                        missing=["task_id"],
+                    ),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to persist pending title-resolution clarification for user_id=%s conversation_id=%s: %s",
+                    user_id,
+                    conversation_id,
+                    exc,
+                )
+                raise HTTPException(status_code=500, detail="Failed to save conversation state. Please try again.") from exc
+
+            response = ExecuteResponse(
+                run_id=run_id,
+                conversation_id=conversation_id,
+                message=message,
+                selected_tool=decision.selected_tool,
+                result=None,
+                reason=decision.reason,
+                final_answer=question,
+                needs_clarification=True,
+                clarification_question=question,
+                clarification_options=clarification_options,
+                needs_confirmation=False,
+                confirmation_question=None,
+                is_multi_step=False,
+                steps=[],
+            )
+            return response
+
         missing = clarification.missing_arguments(decision)
         if missing:
             question = clarification.build_clarification_question(decision.selected_tool, missing)
@@ -339,7 +444,7 @@ def execute(
         # Destructive tools don't execute yet - park the decision and ask
         # the user to explicitly confirm it first.
         if clarification.requires_confirmation(decision.selected_tool):
-            question = clarification.build_confirmation_question(decision)
+            question = clarification.build_confirmation_question(decision, resolved_task_title)
             try:
                 conversation_memory.set_confirmation(
                     db,

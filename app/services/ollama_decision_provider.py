@@ -43,11 +43,15 @@ _SYSTEM_PROMPT = (
     "- Select mark_task_done when the user says a task is finished, done, or "
     "completed, even if they don't specify which one.\n"
     "- If no tool matches the user's message at all, don't call any tool.\n\n"
+    "- When the user refers to a task by its name or a short description "
+    "instead of a numeric id, call the tool with task_title set to that "
+    "description instead of guessing or inventing a numeric task_id.\n\n"
     "Examples:\n"
     '- "I want to delete one of my tasks, but I do not know its ID" -> call delete_task with no arguments.\n'
     '- "I finished one of my tasks" -> call mark_task_done with no arguments.\n'
     '- "Show me my tasks" -> call list_tasks.\n'
-    '- "Rename one of my tasks" -> call update_task with no arguments.\n\n'
+    '- "Rename one of my tasks" -> call update_task with no arguments.\n'
+    '- "Mark the presentation task as done" -> call mark_task_done with task_title="presentation".\n\n'
     "Respond only through the provided tool-call mechanism - never with plain prose."
 )
 

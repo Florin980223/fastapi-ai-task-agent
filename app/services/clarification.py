@@ -20,7 +20,16 @@ import re
 
 from app.services import tool_schemas
 from app.services.conversation_memory import PendingClarification
+from app.services.task_resolution import TaskCandidate
 from app.services.tool_decision import ToolDecision
+
+# Private-by-convention key used to carry an ambiguous title-resolution's
+# candidate list inside PendingClarification.arguments (itself a
+# free-form dict, already JSON-serialized as-is by conversation_memory -
+# see its _json_safe). Never a real tool argument: routes/agent.py and
+# merge_ambiguous_task_reply strip it back out before it could ever reach
+# tool_schemas.validate_tool_call/agent_service.execute_tool.
+CLARIFICATION_CANDIDATES_KEY = "_clarification_candidates"
 
 # Deterministic phrasing for tools with exactly one required argument.
 _SINGLE_ARGUMENT_QUESTIONS: dict[str, str] = {
@@ -150,10 +159,20 @@ def looks_multi_step(message: str) -> bool:
     return any(re.search(r"\b" + re.escape(cue) + r"\b", lowered) for cue in MULTI_STEP_CUES)
 
 
-def build_confirmation_question(decision: ToolDecision) -> str:
-    """Deterministic, tool-specific yes/no question for a destructive decision."""
+def build_confirmation_question(decision: ToolDecision, resolved_title: str | None = None) -> str:
+    """Deterministic, tool-specific yes/no question for a destructive decision.
+
+    resolved_title is only ever passed when task_id came from resolving a
+    task_title reference (see app.services.task_resolution) - naming the
+    resolved task makes it possible for the user to catch a wrong
+    approximate match before confirming. Omitted (None) for an ordinary
+    numeric task_id, which keeps the existing plain wording unchanged.
+    """
     if decision.selected_tool == "delete_task":
-        return f"Are you sure you want to delete task #{decision.arguments['task_id']}?"
+        task_id = decision.arguments["task_id"]
+        if resolved_title is not None:
+            return f'Are you sure you want to delete task #{task_id} ("{resolved_title}")?'
+        return f"Are you sure you want to delete task #{task_id}?"
 
     return "Are you sure you want to proceed?"
 
@@ -300,5 +319,89 @@ def merge_reply(pending: PendingClarification, message: str) -> dict[str, str | 
                 title = message.strip()
                 if title:
                     merged["title"] = title
+
+    return merged
+
+
+# --- Ambiguous title-resolution clarification -------------------------------
+#
+# Separate from the missing-argument flow above: this handles the case
+# where app.services.task_resolution matched more than one of the user's
+# own tasks (or none at all) for a task_title reference, instead of a
+# tool simply being missing a required argument outright.
+
+
+def build_ambiguous_task_question(candidates: list[TaskCandidate]) -> str:
+    """Deterministic question listing every candidate task, e.g.
+    "I found 2 tasks matching that description: #3 'Client presentation',
+    #7 'Client presentation slides'. Which one did you mean? Reply with
+    the number or the exact title."
+    """
+    count = len(candidates)
+    noun = "task" if count == 1 else "tasks"
+    listed = ", ".join(f'#{c.task_id} "{c.title}"' for c in candidates)
+    return (
+        f"I found {count} {noun} matching that description: {listed}. "
+        "Which one did you mean? Reply with the number (1, 2, ...) or the exact title."
+    )
+
+
+def build_not_found_task_question() -> str:
+    """Deterministic, fixed question for when no task matched a title
+    reference at all.
+    """
+    return "I couldn't find a task matching that description. Could you give me the task's exact title or its ID?"
+
+
+def is_ambiguous_task_clarification(pending: PendingClarification) -> bool:
+    """Whether a pending clarification is the ambiguous-title-match kind
+    (carrying a candidate list) rather than an ordinary missing-argument
+    clarification.
+    """
+    return CLARIFICATION_CANDIDATES_KEY in pending.arguments
+
+
+def candidates_from_pending(pending: PendingClarification) -> list[TaskCandidate]:
+    raw = pending.arguments.get(CLARIFICATION_CANDIDATES_KEY) or []
+    return [TaskCandidate(task_id=item["task_id"], title=item["title"]) for item in raw]
+
+
+def merge_ambiguous_task_reply(pending: PendingClarification, message: str) -> dict[str, str | int | bool | None]:
+    """Deterministically resolve a follow-up reply to an ambiguous-title
+    clarification against the candidate list stashed in
+    pending.arguments[CLARIFICATION_CANDIDATES_KEY]. Never calls an LLM.
+
+    Recognizes, in order: a 1-based list position ("2"), an exact
+    (case-insensitive) title match, or a bare task id that matches one of
+    the candidates. If none of those match, the candidate list is left
+    untouched in the merged arguments (still carrying
+    CLARIFICATION_CANDIDATES_KEY) - so the caller can tell resolution
+    remains pending and must ask again, rather than mistaking this for a
+    completed decision.
+    """
+    candidates = candidates_from_pending(pending)
+    merged = dict(pending.arguments)
+    stripped = message.strip()
+
+    resolved_id: int | None = None
+
+    if stripped.isdigit():
+        position = int(stripped)
+        if 1 <= position <= len(candidates):
+            resolved_id = candidates[position - 1].task_id
+        else:
+            matching_id = [c.task_id for c in candidates if c.task_id == position]
+            if matching_id:
+                resolved_id = matching_id[0]
+    else:
+        normalized_reply = stripped.lower()
+        matching_title = [c.task_id for c in candidates if c.title.strip().lower() == normalized_reply]
+        if len(matching_title) == 1:
+            resolved_id = matching_title[0]
+
+    if resolved_id is not None:
+        merged["task_id"] = resolved_id
+        merged.pop(CLARIFICATION_CANDIDATES_KEY, None)
+        merged.pop("task_title", None)
 
     return merged
