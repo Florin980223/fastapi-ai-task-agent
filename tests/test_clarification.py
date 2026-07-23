@@ -318,12 +318,14 @@ def test_existing_missing_argument_merge_reply_is_unaffected():
     # Regression pin: ordinary (non-title) clarification merging is
     # untouched by the ambiguous-title additions above.
     pending = PendingClarification(selected_tool="create_task", arguments={"title": None}, reason="r", missing=["title"])
-    merged = clarification.merge_reply(pending, "Buy milk")
+    merged, needs_clarification_for = clarification.merge_reply(pending, "Buy milk")
     assert merged == {"title": "Buy milk"}
+    assert needs_clarification_for == ()
 
 
 def test_merge_reply_still_prefers_digit_reply_for_task_id():
     pending = PendingClarification(selected_tool="mark_task_done", arguments={"task_id": None}, reason="r", missing=["task_id"])
-    merged = clarification.merge_reply(pending, "3")
+    merged, needs_clarification_for = clarification.merge_reply(pending, "3")
     assert merged["task_id"] == 3
     assert "task_title" not in merged
+    assert needs_clarification_for == ()

@@ -580,18 +580,67 @@ function renderAgentResponse(response) {
     actions.appendChild(confirmBtn);
     actions.appendChild(cancelBtn);
     agentResult.appendChild(actions);
+  } else if (response.selected_tool === "update_task") {
+    // updated_fields (which mutable field(s) this request actually
+    // touched) drives the headline precisely - never inferred from
+    // result.due_date alone, which can't tell "just cleared" apart from
+    // "never had one and wasn't touched this request" (see
+    // ExecuteResponse.updated_fields's docstring in app/schemas.py).
+    const result = isPlainObject(response.result) ? response.result : {};
+    const updatedFields = new Set(response.updated_fields || []);
+    const newTitle = typeof result.title === "string" ? result.title : null;
+
+    if (updatedFields.size === 1 && updatedFields.has("priority")) {
+      appendHeadline(agentResult, "Priority updated");
+      appendDetail(agentResult, newTitle);
+      if (result.priority) appendDetail(agentResult, `${PRIORITY_LABELS[result.priority] || result.priority} priority`);
+    } else if (updatedFields.size === 1 && updatedFields.has("due_date")) {
+      appendHeadline(agentResult, result.due_date ? "Deadline updated" : "Deadline cleared");
+      appendDetail(agentResult, newTitle);
+      if (result.due_date) appendDetail(agentResult, `Due ${formatDueDate(result.due_date)}`);
+    } else {
+      // Title changed (alone or combined with priority/due_date) - the
+      // general case, same title-arrow presentation as before.
+      appendHeadline(agentResult, "Task updated");
+      if (response.resolved_task_title && newTitle) {
+        appendDetail(agentResult, `${response.resolved_task_title} → ${newTitle}`);
+      } else if (newTitle) {
+        appendDetail(agentResult, newTitle);
+      } else if (response.resolved_task_title) {
+        appendDetail(agentResult, response.resolved_task_title);
+      }
+      const meta = [];
+      if (updatedFields.has("priority") && result.priority) {
+        meta.push(`${PRIORITY_LABELS[result.priority] || result.priority} priority`);
+      }
+      if (updatedFields.has("due_date")) {
+        meta.push(result.due_date ? `Due ${formatDueDate(result.due_date)}` : "Deadline cleared");
+      }
+      if (meta.length > 0) appendDetail(agentResult, meta.join(" · "));
+    }
   } else if (response.selected_tool && TOOL_SUCCESS_HEADLINES[response.selected_tool]) {
     appendHeadline(agentResult, TOOL_SUCCESS_HEADLINES[response.selected_tool]);
 
     const newTitle = isPlainObject(response.result) && typeof response.result.title === "string" ? response.result.title : null;
-    if (response.selected_tool === "update_task" && response.resolved_task_title && newTitle) {
-      appendDetail(agentResult, `${response.resolved_task_title} → ${newTitle}`);
-    } else if (newTitle) {
+    if (newTitle) {
       appendDetail(agentResult, newTitle);
     } else if (response.resolved_task_title) {
       appendDetail(agentResult, response.resolved_task_title);
     } else if (isPlainObject(response.result) && response.result.task_id !== undefined) {
       appendDetail(agentResult, `Task #${response.result.task_id}`);
+    }
+
+    if (response.selected_tool === "create_task" && isPlainObject(response.result)) {
+      // Only shown when it's informative - a plain default-priority,
+      // no-due-date task keeps the existing clean two-line look.
+      const meta = [];
+      if (response.result.priority && response.result.priority !== "medium") {
+        meta.push(`${PRIORITY_LABELS[response.result.priority] || response.result.priority} priority`);
+      }
+      if (response.result.due_date) {
+        meta.push(`Due ${formatDueDate(response.result.due_date)}`);
+      }
+      if (meta.length > 0) appendDetail(agentResult, meta.join(" · "));
     }
   } else {
     // list_tasks, get_weather, not_implemented, unknown intent - the

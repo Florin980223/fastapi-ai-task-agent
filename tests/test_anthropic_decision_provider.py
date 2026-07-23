@@ -11,6 +11,7 @@ import pytest
 import app.config as config
 import app.services.agent_decision as agent_decision
 import app.services.anthropic_decision_provider as anthropic_decision_provider
+import app.services.tool_schemas as tool_schemas
 
 
 class _FakeMessages:
@@ -173,3 +174,66 @@ def test_decide_tool_accepts_task_title_only_response(monkeypatch):
 
     assert decision.selected_tool == "mark_task_done"
     assert decision.arguments == {"task_title": "the portfolio task"}
+
+
+# --- priority/due_date schema/validation --------------------------------
+
+
+def test_claude_tool_schema_exposes_priority_and_due_date():
+    tools = anthropic_decision_provider._build_claude_tools()
+    by_name = {tool["name"]: tool for tool in tools}
+
+    for tool_name in ("create_task", "update_task"):
+        schema = by_name[tool_name]["input_schema"]
+        assert schema["properties"]["priority"]["enum"] == sorted(tool_schemas.PRIORITY_VALUES)
+        assert schema["properties"]["due_date"]["type"] == ["string", "null"]
+        # Neither is unconditionally required.
+        assert "priority" not in schema.get("required", [])
+        assert "due_date" not in schema.get("required", [])
+
+
+def test_decide_tool_accepts_valid_priority_and_due_date(monkeypatch):
+    response = _fake_response(
+        [_tool_use_block("update_task", {"task_id": 5, "priority": "high", "due_date": "2026-08-15"})]
+    )
+    monkeypatch.setattr(anthropic_decision_provider, "_get_client", lambda: _FakeClient(response=response))
+
+    decision = anthropic_decision_provider.decide_tool("Make task 5 high priority due 2026-08-15")
+
+    assert decision.selected_tool == "update_task"
+    assert decision.arguments == {"task_id": 5, "priority": "high", "due_date": "2026-08-15"}
+
+
+def test_decide_tool_accepts_explicit_null_due_date_as_a_clear_request(monkeypatch):
+    response = _fake_response([_tool_use_block("update_task", {"task_id": 5, "due_date": None})])
+    monkeypatch.setattr(anthropic_decision_provider, "_get_client", lambda: _FakeClient(response=response))
+
+    decision = anthropic_decision_provider.decide_tool("Clear the deadline for task 5")
+
+    assert decision.selected_tool == "update_task"
+    assert decision.arguments == {"task_id": 5, "due_date": None}
+
+
+def test_invalid_priority_value_is_never_silently_accepted(monkeypatch):
+    # A hallucinated/out-of-enum priority is a real validation failure -
+    # never coerced to a real value, never executed with it.
+    response = _fake_response([_tool_use_block("update_task", {"task_id": 5, "priority": "urgent-ish"})])
+    monkeypatch.setattr(agent_decision, "DECISION_PROVIDER", "anthropic")
+    monkeypatch.setattr(anthropic_decision_provider, "_get_client", lambda: _FakeClient(response=response))
+
+    with pytest.raises(agent_decision.UnsafeFallbackError):
+        agent_decision.decide_tool("Update task 5 to high priority")
+
+
+def test_invalid_due_date_value_is_never_silently_accepted(monkeypatch):
+    # A relative/malformed due_date must never reach execution - this is
+    # classified as a "wrong_type" argument failure (see
+    # tool_schemas.validate_tool_call), which agent_decision's
+    # fallback-safety gate already refuses to silently re-derive via
+    # rule_based for.
+    response = _fake_response([_tool_use_block("update_task", {"task_id": 5, "due_date": "next Friday"})])
+    monkeypatch.setattr(agent_decision, "DECISION_PROVIDER", "anthropic")
+    monkeypatch.setattr(anthropic_decision_provider, "_get_client", lambda: _FakeClient(response=response))
+
+    with pytest.raises(agent_decision.UnsafeFallbackError):
+        agent_decision.decide_tool("Set task 5's deadline to next Friday")

@@ -39,12 +39,20 @@ _SINGLE_ARGUMENT_QUESTIONS: dict[str, str] = {
     "delete_task": "Which task ID should I delete?",
 }
 
+_DUE_DATE_QUESTION = "What due date would you like? Please use the YYYY-MM-DD format."
+
 # update_task is the only tool with two required arguments, so its
-# question depends on which one(s) are missing.
+# question depends on which one(s) are missing. "due_date" here is never
+# "due_date is missing/None" - it only ever appears when
+# agent_decision.ToolDecision.needs_clarification_for flagged it (a
+# reference to a due date that couldn't be confidently resolved to an
+# explicit calendar date) - see missing_arguments below.
 _UPDATE_TASK_QUESTIONS: dict[frozenset[str], str] = {
     frozenset({"task_id"}): "Which task ID would you like to update?",
     frozenset({"title"}): "What should the new title be?",
     frozenset({"task_id", "title"}): "Which task ID would you like to update, and what should the new title be?",
+    frozenset({"due_date"}): _DUE_DATE_QUESTION,
+    frozenset({"task_id", "due_date"}): f"Which task ID would you like to update? {_DUE_DATE_QUESTION}",
 }
 
 
@@ -55,12 +63,41 @@ def missing_arguments(decision: ToolDecision) -> list[str]:
     no tool was selected at all (an unmatched message is never treated
     as a clarifiable tool call) or if the tool has no required arguments
     (e.g. list_tasks).
+
+    update_task special case: "title" is only reported missing when
+    NEITHER priority nor due_date was requested either - a priority-only
+    or due-date-only update (no new title at all) is a valid request, as
+    long as at least one of title/priority/due_date was actually touched.
+    This reduces to exactly the old "title is always required" check for
+    any message that never mentions priority/due_date (every existing
+    test), so it changes nothing for those - see
+    tool_schemas.REQUIRED_ARGUMENTS's own docstring note and
+    tests/test_agent_decision.py.
+
+    create_task/update_task also surface "due_date" as missing whenever
+    decision.needs_clarification_for flags it - a due-date reference the
+    rule-based provider detected but couldn't confidently resolve to an
+    explicit calendar date (see agent_decision._extract_due_date). This
+    is never derived from decision.arguments (there is no marker value
+    living there) - see ToolDecision.needs_clarification_for's docstring.
     """
     if decision.selected_tool is None:
         return []
 
     required = tool_schemas.REQUIRED_ARGUMENTS.get(decision.selected_tool, {})
-    return [name for name in required if decision.arguments.get(name) is None]
+    missing = [name for name in required if decision.arguments.get(name) is None]
+
+    if decision.selected_tool == "update_task" and "title" in missing:
+        priority_given = decision.arguments.get("priority") is not None
+        due_date_given = "due_date" in decision.arguments or "due_date" in decision.needs_clarification_for
+        if priority_given or due_date_given:
+            missing.remove("title")
+
+    for field_name in decision.needs_clarification_for:
+        if field_name not in missing:
+            missing.append(field_name)
+
+    return missing
 
 
 def build_reason(selected_tool: str, missing: list[str]) -> str:
@@ -72,6 +109,9 @@ def build_clarification_question(selected_tool: str, missing: list[str]) -> str:
     """Deterministic, tool-specific question asking for the missing argument(s)."""
     if selected_tool == "update_task":
         return _UPDATE_TASK_QUESTIONS[frozenset(missing)]
+
+    if selected_tool == "create_task" and "title" not in missing and "due_date" in missing:
+        return _DUE_DATE_QUESTION
 
     return _SINGLE_ARGUMENT_QUESTIONS[selected_tool]
 
@@ -269,16 +309,50 @@ def resolve_remembered_task_id(decision: ToolDecision, last_task_id: int | None,
     decision.arguments["task_id"] = last_task_id
 
 
-def merge_reply(pending: PendingClarification, message: str) -> dict[str, str | int | bool | None]:
+def _merge_due_date_reply(merged: dict, message: str) -> bool:
+    """Deterministically parse a follow-up reply to a due-date
+    clarification - the reply is expected to just BE a date (e.g.
+    "2026-08-20"), not a whole sentence. Sets merged["due_date"] and
+    returns True only when the reply is a valid, explicit "YYYY-MM-DD"
+    date (tool_schemas.is_valid_iso_date is the one shared definition of
+    that - also used by tool_schemas.validate_tool_call and
+    agent_decision._extract_due_date, so all three can never drift on
+    what counts as a valid explicit date); otherwise `merged` is left
+    untouched and this returns False, so the caller keeps waiting and
+    re-asks - exactly like an unparseable numeric task-id reply already
+    does today.
+    """
+    candidate = message.strip().strip(" .,!?")
+    if tool_schemas.is_valid_iso_date(candidate):
+        merged["due_date"] = candidate
+        return True
+    return False
+
+
+def merge_reply(
+    pending: PendingClarification, message: str
+) -> tuple[dict[str, str | int | bool | None], tuple[str, ...]]:
     """Deterministically parse a follow-up reply and merge whatever it
     supplies into the pending decision's arguments. Never calls an LLM.
 
     Only fills in arguments that are still missing; anything the reply
     doesn't clearly answer is left as-is for another round.
+
+    Returns (merged_arguments, needs_clarification_for). The second
+    element carries "due_date" forward whenever it was pending and this
+    reply still didn't resolve it to a valid explicit date - due_date's
+    "missing-ness" (unlike task_id/title) can't be re-derived from
+    `merged` alone (an unresolved due_date is simply absent from
+    `merged`, indistinguishable from "never mentioned"), so the caller
+    (routes/agent.py) must thread this into the reconstructed
+    ToolDecision's own needs_clarification_for for missing_arguments to
+    correctly re-ask instead of silently treating the request as
+    complete with due_date silently dropped.
     """
     merged = dict(pending.arguments)
     missing = set(pending.missing)
     tool = pending.selected_tool
+    needs_clarification: list[str] = []
 
     if tool in {"mark_task_done", "delete_task"} and "task_id" in missing:
         task_id = _extract_integer_from_reply(message)
@@ -289,6 +363,10 @@ def merge_reply(pending: PendingClarification, message: str) -> dict[str, str | 
         title = message.strip()
         if title:
             merged["title"] = title
+
+    elif tool in {"create_task", "update_task"} and missing == {"due_date"}:
+        if not _merge_due_date_reply(merged, message):
+            needs_clarification.append("due_date")
 
     elif tool == "get_weather" and "city" in missing:
         city = message.strip()
@@ -319,8 +397,17 @@ def merge_reply(pending: PendingClarification, message: str) -> dict[str, str | 
                 title = message.strip()
                 if title:
                     merged["title"] = title
+        elif missing == {"task_id", "due_date"}:
+            # Best-effort, single-field-per-reply: a reply that's a valid
+            # date resolves due_date (task_id still pending next round);
+            # otherwise try it as the task id (due_date still pending).
+            if not _merge_due_date_reply(merged, message):
+                needs_clarification.append("due_date")
+                task_id = _extract_integer_from_reply(message)
+                if task_id is not None:
+                    merged["task_id"] = task_id
 
-    return merged
+    return merged, tuple(needs_clarification)
 
 
 # --- Ambiguous title-resolution clarification -------------------------------

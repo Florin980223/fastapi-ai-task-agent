@@ -15,9 +15,10 @@ picks between two providers based on app.config.DECISION_PROVIDER:
 
 import logging
 import re
+from typing import NamedTuple
 
 from app.config import DECISION_PROVIDER
-from app.services import anthropic_decision_provider, clarification, decision_validation, ollama_decision_provider
+from app.services import anthropic_decision_provider, clarification, decision_validation, ollama_decision_provider, tool_schemas
 from app.services.tool_decision import ToolDecision
 
 logger = logging.getLogger(__name__)
@@ -71,7 +72,27 @@ RULES: list[tuple[str, list[str], str]] = [
     ),
     (
         "update_task",
-        ["update", "edit", "change task", "rename"],
+        [
+            "update",
+            "edit",
+            "change task",
+            "change the",
+            "rename",
+            # Added for priority/due-date planning commands - see
+            # _extract_priority/_extract_due_date. Multi-word phrases
+            # ("set the", "move the") deliberately, not bare "set"/"move":
+            # bare "set" is a substring of "asset"/"reset"/"offset", and
+            # bare "move" is a substring of "removed" - "set the"/"move
+            # the" avoid both false-positive classes while still matching
+            # every required planning-command example.
+            "make",
+            "set the",
+            "move the",
+            "clear the deadline",
+            "clear the due date",
+            "remove the deadline",
+            "remove the due date",
+        ],
         "The user wants to update an existing task.",
     ),
     (
@@ -98,11 +119,20 @@ def _select_tool(message: str) -> tuple[str | None, str]:
 
 
 # Filler phrases to strip when turning a create_task message into a
-# task title, e.g. "Add a task to buy milk" -> "buy milk".
+# task title, e.g. "Add a task to buy milk" -> "buy milk", or "Create a
+# task called Review documentation" -> "Review documentation". The
+# "called" variants are listed with their full verb prefix (mirroring
+# the existing "X a task to" phrases) so nothing but the real title is
+# ever left behind; "task called" alone is a fallback for any other
+# verb this list doesn't enumerate.
 _TASK_TITLE_FILLER_PHRASES = [
     "add a task to",
     "create a task to",
     "new task to",
+    "add a task called",
+    "create a task called",
+    "new task called",
+    "task called",
     "todo",
 ]
 
@@ -240,6 +270,11 @@ _TASK_REFERENCE_FILLER_PHRASES = [
     "rename",
     "change the",
     "change",
+    "make it",
+    "make the",
+    "make",
+    "set the",
+    "move the",
     "as done",
     "as complete",
     "as completed",
@@ -254,7 +289,13 @@ _TASK_REFERENCE_FILLER_PHRASES = [
 # stray "a". Word-level comparison specifically avoids the substring bug
 # a bare "a" filler phrase would have: "a" is itself a substring of
 # "task", so a naive .find("a") removal would corrupt "task" into "tsk".
-_REFERENCE_STOPWORDS = {"a", "an", "the"}
+# "for"/"and" are here for the same reason, specifically to clean up
+# connector residue left over once a matched priority/due-date phrase is
+# stripped out of a combined command before reference-extraction runs -
+# see _strip_span/_build_arguments's update_task branch - e.g. "Clear the
+# deadline for the client contract task" -> (after stripping the due-date
+# clear phrase) "for the client contract task" -> "client contract".
+_REFERENCE_STOPWORDS = {"a", "an", "the", "for", "and"}
 
 
 def _extract_task_reference(message: str) -> str | None:
@@ -329,16 +370,194 @@ def _extract_new_title(message: str) -> str | None:
     return title
 
 
-def _build_arguments(selected_tool: str | None, message: str) -> dict[str, str | int | bool | None]:
-    """Extract whatever arguments the chosen tool needs from the message."""
+# --- Priority (create_task/update_task only) -------------------------------
+#
+# Deterministic and narrow by design: a canonical value or synonym is only
+# ever recognized in a supported command position - immediately before the
+# word "task" ("a high-priority task"), or trailing at the end of a clause
+# ("make it high priority", "to medium priority"). Anything else (a bare
+# synonym word anywhere, or the phrase mid-title followed by more title
+# words) is left completely alone - never guessed, never normalized. This
+# is what protects a genuine title like "High Priority Clients" or "Urgent
+# Customer Review": "High Priority" there is followed by "Clients", which
+# matches none of the trailing-boundary alternatives below, so it never
+# matches at all.
+
+_PRIORITY_SYNONYMS = {
+    "low": "low",
+    "medium": "medium",
+    "normal": "medium",
+    "high": "high",
+    "urgent": "high",
+    "important": "high",
+}
+
+_PRIORITY_PATTERN = re.compile(
+    r"\b(low|medium|high|urgent|important|normal)[\s-]+priority\b(?=\s+task\b|\s+and\b|[.,!?]|\s*$)",
+    re.IGNORECASE,
+)
+
+
+def _find_priority_match(message: str) -> re.Match | None:
+    return _PRIORITY_PATTERN.search(message)
+
+
+def _extract_priority(message: str) -> str | None:
+    """Pull a canonical priority (low/medium/high) out of a message, e.g.
+    "a high-priority task" or "make it high priority" -> "high". Returns
+    None if no recognized priority phrase is present - never a guess.
+    """
+    match = _find_priority_match(message)
+    if match is None:
+        return None
+    return _PRIORITY_SYNONYMS[match.group(1).lower()]
+
+
+# --- Due date (create_task/update_task only) --------------------------------
+#
+# Deliberately narrow, deterministic "shapes" only - never a bare
+# occurrence of "due"/"deadline" anywhere in the message (that would
+# misfire on genuine titles like "Review deadline policy" or "Due
+# diligence review" - see the module's tests). Each shape below anchors on
+# a distinctive connector ("deadline to/on", "due date", or bare "due"
+# immediately followed by a digit-shaped token) that a normal title
+# sentence essentially never produces incidentally.
+
+
+class _DueDateExtraction(NamedTuple):
+    """Result of looking for a due-date reference in a message.
+
+    mentioned: whether the message referenced a due date at all (clear
+      phrase, or one of the recognized shapes) - False means "not
+      mentioned", the caller must omit the due_date argument entirely
+      (never write None), which is what preserves "omitted means
+      unchanged" for update_task.
+    value: a validated "YYYY-MM-DD" string, or None (either "not
+      mentioned" or "explicit clear" - see `mentioned`/`unclear` to tell
+      those apart).
+    unclear: True when a due-date shape was matched but what followed
+      wasn't a valid explicit calendar date (a relative phrase like "next
+      Friday", or a malformed date like "2026-13-45") - the caller must
+      ask for clarification, never guess or execute with this value.
+    span: the (start, end) range that should be stripped from the message
+      before running the existing task-id/reference/title extractors on
+      it, so e.g. "due 2026-08-15" never leaks into a new task title.
+      When unclear, this is widened to the end of the clause (next
+      sentence-ending punctuation, or end of message) rather than just
+      the connector + one token, so an ambiguous tail like "next Friday"
+      is fully removed too - otherwise leftover words like "Friday" could
+      corrupt task-title resolution before the clarification this
+      triggers ever gets a chance to run (task_resolution runs first -
+      see routes/agent.py). None when nothing matched at all.
+    """
+
+    mentioned: bool
+    value: str | None
+    unclear: bool
+    span: tuple[int, int] | None = None
+
+
+_DUE_DATE_CLEAR_PATTERN = re.compile(r"\b(?:clear|remove)\s+the\s+(?:deadline|due\s+date)\b", re.IGNORECASE)
+
+# Checked in order; the first one whose connector appears wins. Each
+# captures a single following token, used only to test whether it's a
+# valid explicit "YYYY-MM-DD" date - never used verbatim if invalid (see
+# _extract_due_date, which widens the stripped span when it isn't).
+_DUE_DATE_SHAPE_PATTERNS = [
+    re.compile(r"\bdeadline\s+to\s+(\S+)", re.IGNORECASE),
+    re.compile(r"\bdeadline\s+on\s+(\S+)", re.IGNORECASE),
+    re.compile(r"\bdue\s+date\s+(\S+)", re.IGNORECASE),
+    # Bare "due" only counts when immediately followed by a digit-leading
+    # token - this is what lets "Due diligence review" pass through
+    # untouched (no digit follows "due" there) while still catching "due
+    # 2026-08-15" and "due 2026-13-45" (malformed, but clearly an attempt).
+    re.compile(r"\bdue\s+(\d\S*)", re.IGNORECASE),
+]
+
+_CLAUSE_END_PATTERN = re.compile(r"[.,!?]|$")
+
+
+def _extract_due_date(message: str) -> _DueDateExtraction:
+    clear_match = _DUE_DATE_CLEAR_PATTERN.search(message)
+    if clear_match is not None:
+        return _DueDateExtraction(mentioned=True, value=None, unclear=False, span=clear_match.span())
+
+    for pattern in _DUE_DATE_SHAPE_PATTERNS:
+        match = pattern.search(message)
+        if match is None:
+            continue
+        token = match.group(1).strip(" .,!?")
+        if tool_schemas.is_valid_iso_date(token):
+            return _DueDateExtraction(mentioned=True, value=token, unclear=False, span=match.span())
+        clause_end = match.start() + _CLAUSE_END_PATTERN.search(message[match.start():]).start()
+        return _DueDateExtraction(mentioned=True, value=None, unclear=True, span=(match.start(), clause_end))
+
+    return _DueDateExtraction(mentioned=False, value=None, unclear=False, span=None)
+
+
+def _strip_planning_spans(message: str, spans: list[tuple[int, int] | None]) -> str:
+    """Remove each (start, end) span from `message`, rightmost first (so
+    earlier spans' positions - computed against the original message -
+    stay valid throughout), then collapse the resulting whitespace gaps
+    to single spaces. Only ever called when at least one span was
+    actually found (see _build_arguments) - a message with no
+    priority/due-date wording never reaches this function at all, so it
+    is never touched or reformatted in any way.
+    """
+    real_spans = sorted((s for s in spans if s is not None), key=lambda s: s[0], reverse=True)
+    cleaned = message
+    for start, end in real_spans:
+        cleaned = cleaned[:start] + cleaned[end:]
+    return re.sub(r"\s+", " ", cleaned)
+
+
+def _discard_bare_connector(text: str | None) -> str | None:
+    """None if `text` is empty or nothing but the leftover "and" connector
+    from stripping a combined priority/due-date phrase out of a message
+    before title-extraction ran (see _build_arguments's update_task
+    branch) - e.g. "...to high priority and due 2026-08-15" strips both
+    planning phrases, leaving "and" where a new title would have been,
+    which is never a legitimate title on its own.
+    """
+    if text is None:
+        return None
+    if text.strip(" .!?").lower() in ("", "and"):
+        return None
+    return text
+
+
+def _build_arguments(
+    selected_tool: str | None, message: str
+) -> tuple[dict[str, str | int | bool | None], tuple[str, ...]]:
+    """Extract whatever arguments the chosen tool needs from the message.
+
+    Returns (arguments, needs_clarification_for) - the second element is
+    only ever non-empty for create_task/update_task, and only ever
+    contains "due_date" (see _extract_due_date) - everything else always
+    returns an empty tuple.
+    """
     if selected_tool == "create_task":
-        return {"title": _extract_task_title(message)}
+        priority_match = _find_priority_match(message)
+        priority = _PRIORITY_SYNONYMS[priority_match.group(1).lower()] if priority_match else None
+        due_date_result = _extract_due_date(message)
+
+        spans = [priority_match.span() if priority_match else None, due_date_result.span]
+        cleaned_message = _strip_planning_spans(message, spans) if any(spans) else message
+
+        arguments: dict[str, str | int | bool | None] = {"title": _extract_task_title(cleaned_message)}
+        if priority is not None:
+            arguments["priority"] = priority
+        if due_date_result.mentioned and not due_date_result.unclear:
+            arguments["due_date"] = due_date_result.value
+
+        needs_clarification = ("due_date",) if due_date_result.unclear else ()
+        return arguments, needs_clarification
 
     if selected_tool == "list_tasks":
-        return {"done": _extract_done_filter(message)}
+        return {"done": _extract_done_filter(message)}, ()
 
     if selected_tool == "get_weather":
-        return {"city": _extract_city(message)}
+        return {"city": _extract_city(message)}, ()
 
     if selected_tool in ("mark_task_done", "delete_task"):
         task_id = _extract_task_id(message)
@@ -347,24 +566,58 @@ def _build_arguments(selected_tool: str | None, message: str) -> dict[str, str |
             # task_title extraction is even attempted: it would be
             # wasted work, since app.services.task_resolution never
             # looks at task_title once task_id is present.
-            return {"task_id": task_id}
-        return {"task_id": None, "task_title": _extract_task_reference(message)}
+            return {"task_id": task_id}, ()
+        return {"task_id": None, "task_title": _extract_task_reference(message)}, ()
 
     if selected_tool == "update_task":
-        task_id = _extract_task_id(message)
-        if task_id is not None:
-            return {"task_id": task_id, "title": _extract_new_title(message)}
-        task_title, new_title = _extract_update_reference_and_title(message)
-        return {"task_id": None, "task_title": task_title, "title": new_title}
+        priority_match = _find_priority_match(message)
+        priority = _PRIORITY_SYNONYMS[priority_match.group(1).lower()] if priority_match else None
+        due_date_result = _extract_due_date(message)
+        needs_clarification = ("due_date",) if due_date_result.unclear else ()
 
-    return {}
+        spans = [priority_match.span() if priority_match else None, due_date_result.span]
+        cleaned_message = _strip_planning_spans(message, spans) if any(spans) else message
+
+        task_id = _extract_task_id(cleaned_message)
+        if task_id is not None:
+            new_title = _discard_bare_connector(_extract_new_title(cleaned_message))
+            arguments = {"task_id": task_id, "title": new_title}
+        else:
+            task_title, new_title = _extract_update_reference_and_title(cleaned_message)
+            new_title = _discard_bare_connector(new_title)
+            if task_title is None and new_title is None and (priority is not None or due_date_result.mentioned):
+                # A priority/due-date mutation was found but there's no
+                # " to <new title>" rename clause at all (e.g. "Make the
+                # client contract task high priority") - still extract a
+                # bare task reference the same way mark_task_done/
+                # delete_task do. Deliberately gated on priority/due_date
+                # being present: an ordinary update message with neither
+                # keeps its existing, unchanged behavior of extracting no
+                # reference at all without a " to " clause (see
+                # test_update_task_with_no_to_separator_and_no_digit_has_none_arguments).
+                task_title = _extract_task_reference(cleaned_message)
+            arguments = {"task_id": None, "task_title": task_title, "title": new_title}
+
+        if priority is not None:
+            arguments["priority"] = priority
+        if due_date_result.mentioned and not due_date_result.unclear:
+            arguments["due_date"] = due_date_result.value
+
+        return arguments, needs_clarification
+
+    return {}, ()
 
 
 def _decide_tool_rule_based(message: str) -> ToolDecision:
     """Decide which tool (if any) a message should use, and with what arguments."""
     selected_tool, reason = _select_tool(message)
-    arguments = _build_arguments(selected_tool, message)
-    return ToolDecision(selected_tool=selected_tool, arguments=arguments, reason=reason)
+    arguments, needs_clarification_for = _build_arguments(selected_tool, message)
+    return ToolDecision(
+        selected_tool=selected_tool,
+        arguments=arguments,
+        reason=reason,
+        needs_clarification_for=needs_clarification_for,
+    )
 
 
 def _count_matching_rules(message: str) -> int:

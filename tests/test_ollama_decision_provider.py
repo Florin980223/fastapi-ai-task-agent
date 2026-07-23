@@ -246,3 +246,61 @@ def test_ollama_decide_tool_accepts_task_title_only_response(monkeypatch):
 
     assert decision.selected_tool == "mark_task_done"
     assert decision.arguments == {"task_title": "the portfolio task"}
+
+
+# --- priority/due_date schema/validation --------------------------------
+
+
+def test_ollama_tool_schema_exposes_priority_and_due_date():
+    tools = ollama_decision_provider._build_ollama_tools()
+    by_name = {tool["function"]["name"]: tool for tool in tools}
+
+    for tool_name in ("create_task", "update_task"):
+        parameters = by_name[tool_name]["function"]["parameters"]
+        assert parameters["properties"]["priority"]["enum"] == sorted(tool_schemas.PRIORITY_VALUES)
+        assert parameters["properties"]["due_date"]["type"] == ["string", "null"]
+        # Ollama's schema strips "required" entirely (see
+        # _build_ollama_tools's own docstring) - neither field should
+        # appear there even incidentally.
+        assert "required" not in parameters or "priority" not in parameters["required"]
+        assert "required" not in parameters or "due_date" not in parameters["required"]
+
+
+def test_ollama_decide_tool_accepts_valid_priority_and_due_date(monkeypatch):
+    response = _fake_chat_response(
+        [_tool_call("update_task", {"task_id": 5, "priority": "high", "due_date": "2026-08-15"})]
+    )
+    monkeypatch.setattr(ollama_decision_provider, "_call_ollama", lambda payload: response)
+
+    decision = ollama_decision_provider.decide_tool("Make task 5 high priority due 2026-08-15")
+
+    assert decision.selected_tool == "update_task"
+    assert decision.arguments == {"task_id": 5, "priority": "high", "due_date": "2026-08-15"}
+
+
+def test_ollama_decide_tool_accepts_explicit_null_due_date_as_a_clear_request(monkeypatch):
+    response = _fake_chat_response([_tool_call("update_task", {"task_id": 5, "due_date": None})])
+    monkeypatch.setattr(ollama_decision_provider, "_call_ollama", lambda payload: response)
+
+    decision = ollama_decision_provider.decide_tool("Clear the deadline for task 5")
+
+    assert decision.selected_tool == "update_task"
+    assert decision.arguments == {"task_id": 5, "due_date": None}
+
+
+def test_ollama_invalid_priority_value_is_never_silently_accepted(monkeypatch):
+    response = _fake_chat_response([_tool_call("update_task", {"task_id": 5, "priority": "urgent-ish"})])
+    monkeypatch.setattr(agent_decision, "DECISION_PROVIDER", "ollama")
+    monkeypatch.setattr(ollama_decision_provider, "_call_ollama", lambda payload: response)
+
+    with pytest.raises(agent_decision.UnsafeFallbackError):
+        agent_decision.decide_tool("Update task 5 to high priority")
+
+
+def test_ollama_invalid_due_date_value_is_never_silently_accepted(monkeypatch):
+    response = _fake_chat_response([_tool_call("update_task", {"task_id": 5, "due_date": "next Friday"})])
+    monkeypatch.setattr(agent_decision, "DECISION_PROVIDER", "ollama")
+    monkeypatch.setattr(ollama_decision_provider, "_call_ollama", lambda payload: response)
+
+    with pytest.raises(agent_decision.UnsafeFallbackError):
+        agent_decision.decide_tool("Set task 5's deadline to next Friday")

@@ -8,6 +8,11 @@ the two providers can't silently drift apart on what's "required" or
 "the right type" for a given tool.
 """
 
+import re
+from datetime import date
+
+_ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 # JSON Schema arguments for each executable tool. This is provider-neutral:
 # Anthropic wraps it as a tool's "input_schema", Ollama/OpenAI-style wraps
 # it as a function's "parameters" - the schema itself is identical either way.
@@ -29,10 +34,41 @@ _TASK_TITLE_PROPERTY = {
     "description": "The task's title, or a short phrase referring to it, if its numeric id is not known.",
 }
 
+# Canonical priority values - single source of truth for the JSON schema
+# enum below and validate_tool_call's runtime check.
+PRIORITY_VALUES: frozenset[str] = frozenset({"low", "medium", "high"})
+_PRIORITY_PROPERTY = {
+    "type": "string",
+    "enum": sorted(PRIORITY_VALUES),
+    "description": "Task priority - must be exactly one of low/medium/high.",
+}
+_DUE_DATE_PROPERTY = {
+    "type": ["string", "null"],
+    "description": (
+        "Due date as an ISO calendar date, YYYY-MM-DD (e.g. 2026-08-15) - no other format, "
+        "and never a relative phrase like 'Friday' or 'next week'. Pass null to clear an "
+        "existing due date. Omit this field entirely to leave the due date unchanged."
+    ),
+}
+# update_task must have exactly one task selector (task_id or task_title,
+# unchanged from before) AND at least one requested mutation (a new
+# title, priority, or due_date) - two independent OR-constraints, so
+# top-level "required" can no longer name "title" unconditionally (a
+# priority-only or due-date-only update has no new title at all). Both
+# constraints are still expressed for the LLM providers' benefit only -
+# neither is enforced by validate_tool_call, exactly like
+# _TASK_ID_OR_TITLE_ANY_OF already wasn't; the real enforcement is
+# app.services.clarification.missing_arguments.
+_TASK_MUTATION_ANY_OF = [{"required": ["title"]}, {"required": ["priority"]}, {"required": ["due_date"]}]
+
 TOOL_ARGUMENT_SCHEMAS: dict[str, dict] = {
     "create_task": {
         "type": "object",
-        "properties": {"title": {"type": "string", "description": "The task title."}},
+        "properties": {
+            "title": {"type": "string", "description": "The task title."},
+            "priority": _PRIORITY_PROPERTY,
+            "due_date": _DUE_DATE_PROPERTY,
+        },
         "required": ["title"],
     },
     "list_tasks": {
@@ -63,9 +99,10 @@ TOOL_ARGUMENT_SCHEMAS: dict[str, dict] = {
             "task_id": {"type": "integer", "description": "The id of the task to update."},
             "task_title": _TASK_TITLE_PROPERTY,
             "title": {"type": "string", "description": "The new title for the task."},
+            "priority": _PRIORITY_PROPERTY,
+            "due_date": _DUE_DATE_PROPERTY,
         },
-        "required": ["title"],
-        "anyOf": _TASK_ID_OR_TITLE_ANY_OF,
+        "allOf": [{"anyOf": _TASK_ID_OR_TITLE_ANY_OF}, {"anyOf": _TASK_MUTATION_ANY_OF}],
     },
     "delete_task": {
         "type": "object",
@@ -153,3 +190,50 @@ def validate_tool_call(tool_name: str | None, arguments: object) -> None:
         value = arguments.get(arg_name)
         if value is not None and not isinstance(value, expected_type):
             raise ToolCallValidationError(f"Model's call to '{tool_name}' has the wrong type for '{arg_name}'.")
+
+    # priority/due_date are optional (never in REQUIRED_ARGUMENTS above),
+    # but their *value* - whenever the model does supply one - must still
+    # be constrained: an optional argument is not the same as an
+    # unconstrained one. Checked here, independently of required-ness, so
+    # a model hallucinating priority="urgent" or due_date="next Friday"
+    # is caught the same way a wrong-type required argument already is -
+    # never silently coerced or passed through to execution. Deliberately
+    # phrased to include "wrong type" so
+    # decision_validation.classify_validation_failure categorizes this as
+    # "wrong_type", which is exactly the category agent_decision's
+    # _safe_to_fall_back already refuses to silently re-derive via
+    # rule_based - the right behavior for a bad planning-field value too.
+    if "priority" in arguments:
+        priority_value = arguments["priority"]
+        if priority_value is not None and priority_value not in PRIORITY_VALUES:
+            raise ToolCallValidationError(
+                f"Model's call to '{tool_name}' has the wrong type for 'priority': "
+                f"must be one of {sorted(PRIORITY_VALUES)}, got {priority_value!r}."
+            )
+
+    if "due_date" in arguments:
+        due_date_value = arguments["due_date"]
+        if due_date_value is not None and not is_valid_iso_date(due_date_value):
+            raise ToolCallValidationError(
+                f"Model's call to '{tool_name}' has the wrong type for 'due_date': "
+                f"must be an ISO YYYY-MM-DD date string or null, got {due_date_value!r}."
+            )
+
+
+def is_valid_iso_date(value: object) -> bool:
+    """Whether `value` is a string of the exact form YYYY-MM-DD naming a
+    real calendar date. Public (not module-private) and deliberately
+    dependency-free of agent_decision.py/clarification.py - both of those
+    import this as the one shared definition of "is this an explicit,
+    unambiguous calendar date" (agent_decision for its own rule-based
+    extraction, clarification for parsing a reply to a due-date
+    clarification question) - importing either of them from here, or each
+    other, would be circular.
+    """
+    if not isinstance(value, str) or not _ISO_DATE_PATTERN.match(value):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True

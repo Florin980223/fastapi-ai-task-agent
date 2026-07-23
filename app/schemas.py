@@ -157,6 +157,18 @@ class ExecuteResponse(BaseModel):
     # title), for tools with no task target, and whenever no task could
     # be found.
     resolved_task_title: str | None = None
+    # Which of update_task's mutable fields ("title", "priority",
+    # "due_date") this specific request actually asked to change - e.g.
+    # ["priority"] for "Make the client contract task high priority", or
+    # ["due_date"] for a due-date-only set/change/clear. Lets the UI
+    # render an accurate headline ("Priority updated" / "Deadline
+    # updated" / "Deadline cleared" / "Task updated") without guessing
+    # from result.due_date alone, which can't distinguish "just cleared"
+    # from "never had one and wasn't touched this request" (see
+    # app/static/js/app.js). Populated only for update_task; None for
+    # every other tool (including create_task, whose result.title/
+    # priority/due_date already unambiguously describe what was created).
+    updated_fields: list[str] | None = None
     reason: str
     final_answer: str
     needs_clarification: bool = False

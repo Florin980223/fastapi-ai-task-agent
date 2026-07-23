@@ -38,7 +38,7 @@ def test_delete_task_is_never_in_the_planner_allowlist():
 
 def test_unknown_argument_is_rejected():
     with pytest.raises(ToolCallValidationError, match="unsupported argument"):
-        tool_schemas.validate_tool_call("create_task", {"title": "Buy milk", "priority": "high"})
+        tool_schemas.validate_tool_call("create_task", {"title": "Buy milk", "urgency": "asap"})
 
 
 def test_known_arguments_still_pass():

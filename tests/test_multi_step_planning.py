@@ -232,7 +232,7 @@ def test_execute_plan_rejects_an_unsupported_argument(new_db_session, test_user_
     # validated) catches an argument a tool doesn't actually accept.
     plan = AgentPlan(
         steps=[
-            PlannedStep(tool="create_task", arguments={"title": "buy milk", "priority": "high"}),
+            PlannedStep(tool="create_task", arguments={"title": "buy milk", "urgency": "asap"}),
             PlannedStep(tool="list_tasks", arguments={}),
         ]
     )

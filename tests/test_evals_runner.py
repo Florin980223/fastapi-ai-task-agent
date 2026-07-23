@@ -1,6 +1,6 @@
 """Focused pytest tests for the evaluation suite's own machinery
 (parsing, scoring, isolation, reports, exit codes) - never the real
-34-case dataset (evals/data/cases_v1.jsonl), and never `--mode live-ollama`
+58-case dataset (evals/data/cases_v1.jsonl), and never `--mode live-ollama`
 or `--allow-live-ollama`, so this file can never make a real Ollama call.
 """
 

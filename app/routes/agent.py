@@ -101,6 +101,27 @@ def _lookup_existing_task_title(db: Session, user_id: str, decision: ToolDecisio
     return task.title if task is not None else None
 
 
+def _compute_updated_fields(decision: ToolDecision) -> list[str] | None:
+    """Which of update_task's mutable fields ("title", "priority",
+    "due_date") this decision actually requested changing - see
+    ExecuteResponse.updated_fields's docstring for why the UI needs this
+    (it can't safely infer "cleared" vs "never had one" from result.due_date
+    alone). None for every other tool. due_date counts as touched whenever
+    the key is present at all - including an explicit clear (value None) -
+    never by whether the resulting value happens to be None.
+    """
+    if decision.selected_tool != "update_task":
+        return None
+    fields = []
+    if decision.arguments.get("title") is not None:
+        fields.append("title")
+    if decision.arguments.get("priority") is not None:
+        fields.append("priority")
+    if "due_date" in decision.arguments:
+        fields.append("due_date")
+    return fields
+
+
 @router.post("/execute", response_model=ExecuteResponse)
 def execute(
     request: ExecuteRequest,
@@ -237,6 +258,7 @@ def execute(
             # like "3". An ambiguous-title clarification (carrying a candidate
             # list) is parsed differently from an ordinary missing-argument
             # one - see clarification.is_ambiguous_task_clarification.
+            needs_clarification_for: tuple[str, ...] = ()
             if clarification.is_ambiguous_task_clarification(pending):
                 merged_arguments = clarification.merge_ambiguous_task_reply(pending, message)
                 if clarification.CLARIFICATION_CANDIDATES_KEY in merged_arguments:
@@ -264,12 +286,13 @@ def execute(
                     )
                     return response
             else:
-                merged_arguments = clarification.merge_reply(pending, message)
+                merged_arguments, needs_clarification_for = clarification.merge_reply(pending, message)
 
             decision = ToolDecision(
                 selected_tool=pending.selected_tool,
                 arguments=merged_arguments,
                 reason=pending.reason,
+                needs_clarification_for=needs_clarification_for,
             )
         else:
             if agent_planner.should_attempt_planning(message):
@@ -530,6 +553,7 @@ def execute(
             )
             return response
 
+        updated_fields = _compute_updated_fields(decision)
         step_started = time.monotonic()
         result = agent_service.execute_tool(decision, db, user_id)
         single_step_duration_ms = int((time.monotonic() - step_started) * 1000)
@@ -543,6 +567,7 @@ def execute(
             selected_tool=decision.selected_tool,
             result=result,
             resolved_task_title=resolved_task_title,
+            updated_fields=updated_fields,
             reason=decision.reason,
             final_answer=final_answer,
             needs_clarification=False,

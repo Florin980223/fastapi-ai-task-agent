@@ -81,15 +81,32 @@ def test_task_title_is_not_in_required_arguments(tool_name):
 @pytest.mark.parametrize("tool_name", TASK_ID_OR_TITLE_TOOLS)
 def test_schema_anyof_expresses_task_id_or_task_title(tool_name):
     schema = tool_schemas.TOOL_ARGUMENT_SCHEMAS[tool_name]
-    assert schema["anyOf"] == [{"required": ["task_id"]}, {"required": ["task_title"]}]
+    # update_task's selector anyOf now lives nested inside "allOf"
+    # alongside a second anyOf for "at least one mutation" (see below) -
+    # mark_task_done/delete_task are unaffected and keep the plain
+    # top-level "anyOf".
+    if tool_name == "update_task":
+        assert schema["allOf"][0]["anyOf"] == [{"required": ["task_id"]}, {"required": ["task_title"]}]
+    else:
+        assert schema["anyOf"] == [{"required": ["task_id"]}, {"required": ["task_title"]}]
     assert "task_id" not in schema.get("required", [])
 
 
-def test_update_task_new_title_is_still_hard_required():
-    # title (the *new* title being written) is unaffected by this
-    # feature - it has no alternative and must remain a hard requirement.
+def test_update_task_title_is_no_longer_unconditionally_required():
+    # A priority-only or due-date-only update (no new title at all) is a
+    # valid request - title no longer has a top-level "required" entry;
+    # it's one of three alternatives (title/priority/due_date), at least
+    # one of which must be present, expressed as a second "anyOf" nested
+    # in "allOf" alongside the existing task_id/task_title selector anyOf.
     schema = tool_schemas.TOOL_ARGUMENT_SCHEMAS["update_task"]
-    assert schema["required"] == ["title"]
+    assert "required" not in schema
+    assert schema["allOf"][1]["anyOf"] == [
+        {"required": ["title"]},
+        {"required": ["priority"]},
+        {"required": ["due_date"]},
+    ]
+    # Still type-checked (via REQUIRED_ARGUMENTS) whenever it IS given -
+    # only its unconditional presence requirement was relaxed.
     assert tool_schemas.REQUIRED_ARGUMENTS["update_task"]["title"] is str
 
 

@@ -444,3 +444,211 @@ def test_title_resolution_only_searches_the_callers_own_tasks_end_to_end(client,
 
     assert data["needs_clarification"] is True
     assert "couldn't find a task" in data["final_answer"]
+
+
+# --- Agent Work Planning v1: priority/due_date via natural language ------
+
+
+def test_create_task_with_high_priority(client):
+    data = _execute(client, "Create a high-priority task called Send client proposal")
+
+    assert data["selected_tool"] == "create_task"
+    assert data["result"]["title"] == "Send client proposal"
+    assert data["result"]["priority"] == "high"
+    assert data["result"]["due_date"] is None
+
+
+def test_create_task_with_explicit_due_date(client):
+    data = _execute(client, "Create a task called Send client proposal due 2026-08-15")
+
+    assert data["selected_tool"] == "create_task"
+    assert data["result"]["priority"] == "medium"
+    assert data["result"]["due_date"] == "2026-08-15"
+
+
+def test_create_task_with_priority_and_due_date(client):
+    data = _execute(client, "Create a high-priority task called Send client proposal due 2026-08-15")
+
+    assert data["selected_tool"] == "create_task"
+    assert data["result"]["title"] == "Send client proposal"
+    assert data["result"]["priority"] == "high"
+    assert data["result"]["due_date"] == "2026-08-15"
+
+
+def test_update_priority_by_explicit_task_id(client):
+    created = _execute(client, "Add a task to Client contract review")
+    task_id = created["result"]["id"]
+
+    data = _execute(client, f"Make task {task_id} high priority")
+
+    assert data["selected_tool"] == "update_task"
+    assert data["needs_clarification"] is False
+    assert data["result"]["title"] == "Client contract review"
+    assert data["result"]["priority"] == "high"
+    assert data["updated_fields"] == ["priority"]
+
+
+def test_update_priority_by_task_title(client):
+    _execute(client, "Add a task to Client contract review")
+
+    data = _execute(client, "Make the client contract task high priority")
+
+    assert data["selected_tool"] == "update_task"
+    assert data["needs_clarification"] is False
+    assert data["result"]["title"] == "Client contract review"
+    assert data["result"]["priority"] == "high"
+    assert data["updated_fields"] == ["priority"]
+
+
+def test_set_due_date_by_task_title(client):
+    _execute(client, "Add a task to Q4 report")
+
+    data = _execute(client, "Set the Q4 report deadline to 2026-08-20")
+
+    assert data["selected_tool"] == "update_task"
+    assert data["needs_clarification"] is False
+    assert data["result"]["due_date"] == "2026-08-20"
+    assert data["updated_fields"] == ["due_date"]
+
+
+def test_change_due_date(client):
+    _execute(client, "Add a task to Q4 report")
+    _execute(client, "Set the Q4 report deadline to 2026-08-20")
+
+    data = _execute(client, "Move the Q4 report deadline to 2026-09-01")
+
+    assert data["result"]["due_date"] == "2026-09-01"
+    assert data["updated_fields"] == ["due_date"]
+
+
+def test_clear_due_date_with_explicit_null(client):
+    _execute(client, "Add a task to Client contract")
+    _execute(client, "Set the client contract deadline to 2026-08-20")
+
+    data = _execute(client, "Clear the deadline for the client contract task")
+
+    assert data["selected_tool"] == "update_task"
+    assert data["needs_clarification"] is False
+    assert data["result"]["due_date"] is None
+    assert data["updated_fields"] == ["due_date"]
+
+
+def test_combined_priority_and_due_date_update(client):
+    _execute(client, "Add a task to Client proposal")
+
+    data = _execute(client, "Update the client proposal task to high priority and due 2026-08-15")
+
+    assert data["selected_tool"] == "update_task"
+    assert data["needs_clarification"] is False
+    assert data["result"]["priority"] == "high"
+    assert data["result"]["due_date"] == "2026-08-15"
+    assert set(data["updated_fields"]) == {"priority", "due_date"}
+
+
+def test_ambiguous_task_title_still_clarifies_before_priority_update(client):
+    first = _execute(client, "Add a task to Client presentation")
+    second = _execute(client, "Add a task to Team presentation")
+
+    data = _execute(client, "Make the presentation task high priority")
+
+    assert data["needs_clarification"] is True
+    assert data["clarification_options"] is not None
+    assert {o["task_id"] for o in data["clarification_options"]} == {first["result"]["id"], second["result"]["id"]}
+    # Neither task was touched.
+    tasks = client.get("/tasks").json()
+    assert all(t["priority"] == "medium" for t in tasks)
+
+
+def test_missing_task_still_returns_not_found_clarification_for_priority_update(client):
+    data = _execute(client, "Make the nonexistent xyz task high priority")
+
+    assert data["needs_clarification"] is True
+    assert data["clarification_options"] is None
+    assert "couldn't find a task" in data["final_answer"]
+
+
+def test_priority_and_due_date_cross_user_isolation(client, other_user_headers):
+    other = client.post("/tasks", json={"title": "Client contract"}, headers=other_user_headers).json()
+
+    # Alice has no task by this name - must not touch Bob's task.
+    data = _execute(client, "Make the client contract task high priority")
+
+    assert data["needs_clarification"] is True
+    assert "couldn't find a task" in data["final_answer"]
+    bob_task = client.get(f"/tasks/{other['id']}", headers=other_user_headers).json()
+    assert bob_task["priority"] == "medium"
+
+
+def test_existing_id_and_title_resolution_behavior_remains_unchanged(client):
+    # Plain digit-based and title-based update/mark-done flows, untouched
+    # by any of the new priority/due-date machinery.
+    created = _execute(client, "Add a task to buy milk")
+    task_id = created["result"]["id"]
+
+    renamed = _execute(client, f"Update task {task_id} to Buy oat milk")
+    assert renamed["result"]["title"] == "Buy oat milk"
+    assert renamed["updated_fields"] == ["title"]
+
+    _execute(client, "Add a task to Prepare final portfolio")
+    by_title = _execute(client, "Rename the portfolio task to Prepare summer portfolio")
+    assert by_title["result"]["title"] == "Prepare summer portfolio"
+
+
+def test_malformed_date_is_rejected_safely(client):
+    _execute(client, "Add a task to Client proposal")
+
+    data = _execute(client, "Update the client proposal task due 2026-13-45")
+
+    assert data["needs_clarification"] is True
+    assert "YYYY-MM-DD" in data["final_answer"]
+    # Nothing was changed.
+    tasks = client.get("/tasks").json()
+    assert tasks[0]["due_date"] is None
+
+
+def test_ambiguous_relative_date_asks_for_calendar_date_then_completes(client):
+    _execute(client, "Add a task to Client contract renewal")
+
+    asked = _execute(client, "Set the client contract renewal deadline to next Friday")
+    assert asked["needs_clarification"] is True
+    assert "YYYY-MM-DD" in asked["final_answer"]
+    conversation_id = asked["conversation_id"]
+
+    # Another ambiguous reply - keeps asking, doesn't guess or execute.
+    asked_again = _execute(client, "how about next Monday", conversation_id=conversation_id)
+    assert asked_again["needs_clarification"] is True
+    assert "YYYY-MM-DD" in asked_again["final_answer"]
+    tasks = client.get("/tasks").json()
+    assert tasks[0]["due_date"] is None
+
+    # A valid reply completes the request.
+    completed = _execute(client, "2026-09-05", conversation_id=conversation_id)
+    assert completed["needs_clarification"] is False
+    assert completed["result"]["due_date"] == "2026-09-05"
+    assert completed["updated_fields"] == ["due_date"]
+
+
+def test_updated_fields_priority_only_reports_priority_updated_headline_data(client):
+    _execute(client, "Add a task to Client contract")
+
+    data = _execute(client, "Make the client contract task high priority")
+
+    assert data["updated_fields"] == ["priority"]
+
+
+def test_updated_fields_due_date_clear_reports_deadline_cleared_headline_data(client):
+    _execute(client, "Add a task to Client contract")
+    _execute(client, "Set the client contract deadline to 2026-08-20")
+
+    data = _execute(client, "Clear the deadline for the client contract task")
+
+    assert data["updated_fields"] == ["due_date"]
+    assert data["result"]["due_date"] is None
+
+
+def test_updated_fields_is_none_for_non_update_tools(client):
+    created = _execute(client, "Add a task to buy milk")
+    assert created["updated_fields"] is None
+
+    done = _execute(client, f"Mark task {created['result']['id']} as done")
+    assert done["updated_fields"] is None

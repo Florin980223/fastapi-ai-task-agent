@@ -8,6 +8,8 @@ future AI-based decision provider could replace agent_decision.py
 without any changes here.
 """
 
+from datetime import date
+
 from sqlalchemy.orm import Session
 
 from app.schemas import TaskResponse
@@ -33,7 +35,22 @@ def _task_to_dict(task) -> dict:
 
 
 def _execute_create_task(db: Session, user_id: str, arguments: dict) -> dict:
-    task = task_service.create_task(db, user_id, title=arguments["title"], description=None)
+    due_date_str = arguments.get("due_date")
+    # Deliberately no try/except here: by the time execute_tool runs,
+    # due_date has already been validated (rule_based only ever produces
+    # a real ISO string or omits the key entirely - see
+    # agent_decision._extract_due_date/ToolDecision.needs_clarification_for
+    # - and tool_schemas.validate_tool_call already rejected an
+    # LLM-supplied malformed one before this point).
+    due_date = date.fromisoformat(due_date_str) if due_date_str is not None else None
+    task = task_service.create_task(
+        db,
+        user_id,
+        title=arguments["title"],
+        description=None,
+        priority=arguments.get("priority", "medium"),
+        due_date=due_date,
+    )
     return _task_to_dict(task)
 
 
@@ -73,10 +90,33 @@ def _execute_update_task(db: Session, user_id: str, arguments: dict) -> dict:
         return {"error": "Could not find a task id in your message. Please include a task id, e.g. 'update task 1 to New title'."}
 
     new_title = arguments.get("title")
-    if new_title is None:
-        return {"error": "Could not find a new title in your message. Please include a new title, e.g. 'update task 1 to New title'."}
+    priority = arguments.get("priority")
+    # Tri-state due_date, exactly like routes/tasks.py's PATCH handler:
+    # only pass due_date= through at all when the key is actually present
+    # (a real ISO string, or None meaning "clear it") - task_service's own
+    # _UNSET sentinel default is what makes omitting this kwarg entirely
+    # mean "leave unchanged".
+    due_date_kwargs: dict = {}
+    if "due_date" in arguments:
+        due_date_str = arguments["due_date"]
+        due_date_kwargs["due_date"] = date.fromisoformat(due_date_str) if due_date_str is not None else None
 
-    task = task_service.update_task(db, user_id, task_id, title=new_title, description=None)
+    # At least one of title/priority/due_date must have actually been
+    # requested - see clarification.missing_arguments, which already
+    # gates this before execute_tool is ever reached in the normal flow;
+    # this is only a defense-in-depth safety net.
+    if new_title is None and priority is None and not due_date_kwargs:
+        return {"error": "Could not find anything to update in your message. Please include a new title, priority, or due date."}
+
+    task = task_service.update_task(
+        db,
+        user_id,
+        task_id,
+        title=new_title,
+        description=None,
+        priority=priority,
+        **due_date_kwargs,
+    )
     if task is None:
         return {"error": f"Task {task_id} was not found."}
 
