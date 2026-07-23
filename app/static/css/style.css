@@ -153,6 +153,7 @@ label {
 }
 
 input,
+select,
 textarea {
   font: inherit;
   padding: 0.5rem;
@@ -265,6 +266,41 @@ main {
 
 .task-description {
   margin: 0;
+  color: var(--color-text-muted);
+}
+
+.task-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.priority-badge {
+  display: inline-block;
+  padding: 0.15rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.priority-badge[data-priority="low"] {
+  color: var(--color-text-muted);
+}
+
+.priority-badge[data-priority="medium"] {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.priority-badge[data-priority="high"] {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+
+.task-due-date {
+  font-size: 0.85rem;
   color: var(--color-text-muted);
 }
 

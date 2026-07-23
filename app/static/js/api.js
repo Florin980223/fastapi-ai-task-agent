@@ -75,14 +75,25 @@ export function listTasks() {
   return apiFetch("/tasks");
 }
 
-export function createTask({ title, description }) {
-  return apiFetch("/tasks", { method: "POST", body: JSON.stringify({ title, description: description || null }) });
+export function createTask({ title, description, priority, dueDate }) {
+  const body = { title, description: description || null };
+  if (priority !== undefined) body.priority = priority;
+  // An empty date input means "no due date" - never sent as an empty
+  // string (which the backend's date parser would reject).
+  body.due_date = dueDate || null;
+  return apiFetch("/tasks", { method: "POST", body: JSON.stringify(body) });
 }
 
-export function updateTask(taskId, { title, description }) {
+export function updateTask(taskId, { title, description, priority, dueDate }) {
   const body = {};
   if (title !== undefined) body.title = title;
   if (description !== undefined) body.description = description;
+  if (priority !== undefined) body.priority = priority;
+  // dueDate === undefined means "the caller didn't touch this" - omit
+  // the key entirely, so the backend's tri-state (omitted = unchanged)
+  // applies. dueDate === null/"" means "clear it" - send null
+  // explicitly, distinct from omitting the key.
+  if (dueDate !== undefined) body.due_date = dueDate || null;
   return apiFetch(`/tasks/${encodeURIComponent(taskId)}`, { method: "PATCH", body: JSON.stringify(body) });
 }
 

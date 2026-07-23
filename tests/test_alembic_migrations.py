@@ -27,7 +27,7 @@ from sqlalchemy import create_engine, inspect, text
 from app.config import UNMIGRATED_USER_ID
 from app.database import Base
 from app import db_models  # noqa: F401 - registers all models on Base.metadata
-from app.services.db_migrate import backfill_legacy_user_id_columns
+from app.services.db_migrate import backfill_legacy_task_priority_and_due_date_columns, backfill_legacy_user_id_columns
 from app.services.schema_migration import (
     SchemaNotAdoptedError,
     SchemaOutOfDateError,
@@ -104,7 +104,15 @@ def test_fresh_database_upgrade_to_head_creates_expected_schema(tmp_path):
     assert tables == {"tasks", "agent_runs", "agent_run_steps", "conversation_states", "alembic_version"}
 
     task_columns = {c["name"]: c["nullable"] for c in inspector.get_columns("tasks")}
-    assert task_columns == {"id": False, "user_id": False, "title": False, "description": True, "done": False}
+    assert task_columns == {
+        "id": False,
+        "user_id": False,
+        "title": False,
+        "description": True,
+        "done": False,
+        "priority": False,
+        "due_date": True,
+    }
 
     run_indexes = {ix["name"]: ix for ix in inspector.get_indexes("agent_runs")}
     # SQLite's inspector reports "unique" as 1/0, not a Python bool.
@@ -125,7 +133,7 @@ def test_fresh_database_upgrade_to_head_creates_expected_schema(tmp_path):
     assert set(unique_constraints[0]["column_names"]) == {"user_id", "conversation_id"}
 
     current = MigrationContext.configure(engine.connect()).get_current_revision()
-    assert current == "0001_baseline"
+    assert current == "0002_add_task_priority_and_due_date"
     engine.dispose()
 
 
@@ -152,6 +160,11 @@ def test_legacy_database_adoption_preserves_all_rows(tmp_path):
     # fully current using the app's own existing, already-tested logic.
     Base.metadata.create_all(bind=engine)
     backfill_legacy_user_id_columns(engine)
+    # A genuinely pre-Alembic legacy database predates priority/due_date
+    # too (they were added in 0002, long after user_id) - create_all()
+    # never alters this already-existing table, so this needs its own
+    # explicit backfill, exactly like user_id above.
+    backfill_legacy_task_priority_and_due_date_columns(engine)
     # backfill_legacy_user_id_columns adds the missing user_id COLUMN
     # but - a genuine, pre-existing gap this test's diff check below
     # caught - never the accompanying INDEX the ORM model declares
@@ -179,18 +192,24 @@ def test_legacy_database_adoption_preserves_all_rows(tmp_path):
     assert _table_names(engine) == {"tasks", "agent_runs", "agent_run_steps", "conversation_states", "alembic_version"}
 
     with engine.connect() as connection:
-        rows = connection.execute(text("SELECT title, description, done, user_id FROM tasks ORDER BY id")).all()
+        rows = connection.execute(
+            text("SELECT title, description, done, user_id, priority, due_date FROM tasks ORDER BY id")
+        ).all()
     assert len(rows) == 2
     assert rows[0].title == "Legacy task 1"
     assert rows[0].description is None
     assert rows[0].done == 0
     assert rows[0].user_id == UNMIGRATED_USER_ID
+    assert rows[0].priority == "medium"
+    assert rows[0].due_date is None
     assert rows[1].title == "Legacy task 2"
     assert rows[1].description == "2 liters"
     assert rows[1].user_id == UNMIGRATED_USER_ID
+    assert rows[1].priority == "medium"
+    assert rows[1].due_date is None
 
     current = MigrationContext.configure(engine.connect()).get_current_revision()
-    assert current == "0001_baseline"
+    assert current == "0002_add_task_priority_and_due_date"
     engine.dispose()
 
 
@@ -219,7 +238,7 @@ def test_already_current_database_is_verified_and_stamped_without_recreating_tab
     assert rows[0].title == "Buy milk"
 
     current = MigrationContext.configure(engine.connect()).get_current_revision()
-    assert current == "0001_baseline"
+    assert current == "0002_add_task_priority_and_due_date"
     engine.dispose()
 
 
@@ -261,6 +280,82 @@ def test_baseline_matches_current_orm_metadata(tmp_path):
     # a fast local test: if app/db_models.py ever changes without a
     # matching new revision, this fails immediately.
     command.check(cfg)
+
+
+# --- 5b. 0002_add_task_priority_and_due_date: upgrade/downgrade safety -------
+
+
+def test_0002_upgrade_backfills_existing_rows_with_medium_priority(tmp_path):
+    db_path = tmp_path / "backfill.db"
+    cfg = _config_for(db_path)
+    command.upgrade(cfg, "0001_baseline")
+
+    engine = _engine_for(db_path)
+    with engine.begin() as connection:
+        connection.execute(
+            text("INSERT INTO tasks (user_id, title, description, done) VALUES ('alice', 'Buy milk', NULL, 0)")
+        )
+        connection.execute(
+            text("INSERT INTO tasks (user_id, title, description, done) VALUES ('alice', 'Walk the dog', NULL, 1)")
+        )
+
+    command.upgrade(cfg, "head")
+
+    with engine.connect() as connection:
+        rows = connection.execute(text("SELECT id, title, priority, due_date FROM tasks ORDER BY id")).all()
+    assert len(rows) == 2
+    assert [r.title for r in rows] == ["Buy milk", "Walk the dog"]
+    assert all(r.priority == "medium" for r in rows)
+    assert all(r.due_date is None for r in rows)
+    engine.dispose()
+
+
+def test_0002_downgrade_removes_only_priority_and_due_date_preserving_rows(tmp_path):
+    db_path = tmp_path / "downgrade_0002.db"
+    cfg = _config_for(db_path)
+    command.upgrade(cfg, "head")
+
+    engine = _engine_for(db_path)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO tasks (user_id, title, description, done, priority, due_date) "
+                "VALUES ('alice', 'Buy milk', 'a dozen', 0, 'high', '2026-08-15')"
+            )
+        )
+    with engine.connect() as connection:
+        task_id = connection.execute(text("SELECT id FROM tasks")).scalar_one()
+
+    command.downgrade(cfg, "0001_baseline")
+
+    inspector = inspect(engine)
+    columns = {c["name"] for c in inspector.get_columns("tasks")}
+    assert columns == {"id", "user_id", "title", "description", "done"}
+
+    with engine.connect() as connection:
+        rows = connection.execute(text("SELECT id, user_id, title, description, done FROM tasks")).all()
+    assert len(rows) == 1
+    assert rows[0].id == task_id
+    assert rows[0].user_id == "alice"
+    assert rows[0].title == "Buy milk"
+    assert rows[0].description == "a dozen"
+    assert rows[0].done == 0
+
+    current = MigrationContext.configure(engine.connect()).get_current_revision()
+    assert current == "0001_baseline"
+
+    # Can be upgraded again successfully - priority is backfilled fresh
+    # (due_date's prior value is unrecoverable, having been dropped by
+    # the downgrade - that's an inherent, expected consequence of
+    # dropping a column, not a bug).
+    command.upgrade(cfg, "head")
+    with engine.connect() as connection:
+        row = connection.execute(text("SELECT id, title, priority, due_date FROM tasks")).one()
+    assert row.id == task_id
+    assert row.title == "Buy milk"
+    assert row.priority == "medium"
+    assert row.due_date is None
+    engine.dispose()
 
 
 # --- 6. app.database.init_db() / ensure_schema_is_current --------------------

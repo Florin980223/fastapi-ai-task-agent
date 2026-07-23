@@ -328,10 +328,14 @@ def _cmd_adopt_legacy(database_path: Path, backup_path: Path) -> int:
         try:
             from app import db_models  # noqa: F401 - registers all models on Base.metadata
             from app.database import Base
-            from app.services.db_migrate import backfill_legacy_user_id_columns
+            from app.services.db_migrate import (
+                backfill_legacy_task_priority_and_due_date_columns,
+                backfill_legacy_user_id_columns,
+            )
 
             Base.metadata.create_all(bind=engine)
             backfill_legacy_user_id_columns(engine)
+            backfill_legacy_task_priority_and_due_date_columns(engine)
             for table in Base.metadata.tables.values():
                 for index in table.indexes:
                     index.create(bind=engine, checkfirst=True)
@@ -358,7 +362,7 @@ def _cmd_adopt_legacy(database_path: Path, backup_path: Path) -> int:
     finally:
         engine.dispose()
 
-    print(f"Adoption complete: {database_path} is now stamped at 0001_baseline.")
+    print(f"Adoption complete: {database_path} is now stamped at {_head_revision()}.")
     return 0
 
 
@@ -383,8 +387,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     adopt_parser = subparsers.add_parser(
         "adopt-legacy",
         help=(
-            "Adopt an existing pre-Alembic database: add missing user_id columns/"
-            "indexes, create conversation_states, verify, and stamp 0001_baseline."
+            "Adopt an existing pre-Alembic database: add missing user_id/priority/"
+            "due_date columns, missing indexes, create conversation_states, verify, "
+            "and stamp at head."
         ),
     )
     adopt_parser.add_argument(

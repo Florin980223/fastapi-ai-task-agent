@@ -6,9 +6,9 @@ API accepts/returns.
 """
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint, Uuid
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -22,6 +22,19 @@ class Task(Base):
     title: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str | None] = mapped_column(String, nullable=True)
     done: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # "low" | "medium" | "high" - validated at the Pydantic layer (see
+    # app.schemas.TaskCreate/TaskUpdate), not with a DB-level CHECK
+    # constraint or native enum type, to keep this column portable and
+    # simple to evolve across SQLite/PostgreSQL. server_default (not just
+    # a Python-side default) matters here: it's what lets a plain ALTER
+    # TABLE ADD COLUMN backfill every pre-existing row with 'medium' in
+    # one statement (see alembic/versions/0002_*), and what lets a raw
+    # INSERT that omits this column still satisfy NOT NULL.
+    priority: Mapped[str] = mapped_column(String, nullable=False, default="medium", server_default="medium")
+    # Calendar date only - no time-of-day or timezone component at all,
+    # by construction (sa.Date, not DateTime), so there is nothing here
+    # for a client to misinterpret across timezones.
+    due_date: Mapped[date | None] = mapped_column(Date, nullable=True, default=None)
 
 
 class AgentRun(Base):

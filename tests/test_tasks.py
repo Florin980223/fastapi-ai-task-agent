@@ -100,6 +100,144 @@ def test_task_remains_available_through_a_new_repository_session(client, new_db_
     assert [task.id for task in tasks] == [created["id"]]
 
 
+# --- Priority and due_date ------------------------------------------------
+
+
+def test_create_task_defaults_priority_to_medium_and_due_date_to_none(client):
+    response = client.post("/tasks", json={"title": "Buy milk"})
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["priority"] == "medium"
+    assert body["due_date"] is None
+
+
+def test_create_task_accepts_explicit_priority_and_due_date(client):
+    response = client.post(
+        "/tasks", json={"title": "Prepare Q3 report", "priority": "high", "due_date": "2026-08-15"}
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["priority"] == "high"
+    assert body["due_date"] == "2026-08-15"
+
+
+def test_create_task_rejects_invalid_priority(client):
+    response = client.post("/tasks", json={"title": "Buy milk", "priority": "urgent"})
+
+    assert response.status_code == 422
+
+
+def test_create_task_rejects_malformed_due_date(client):
+    response = client.post("/tasks", json={"title": "Buy milk", "due_date": "15/08/2026"})
+
+    assert response.status_code == 422
+
+
+def test_update_omitted_priority_leaves_it_unchanged(client):
+    created = client.post("/tasks", json={"title": "Buy milk", "priority": "high"}).json()
+    task_id = created["id"]
+
+    response = client.patch(f"/tasks/{task_id}", json={"title": "Buy oat milk"})
+
+    assert response.status_code == 200
+    assert response.json()["priority"] == "high"
+
+
+def test_update_explicit_valid_priority_updates_it(client):
+    created = client.post("/tasks", json={"title": "Buy milk"}).json()
+    task_id = created["id"]
+    assert created["priority"] == "medium"
+
+    response = client.patch(f"/tasks/{task_id}", json={"priority": "low"})
+
+    assert response.status_code == 200
+    assert response.json()["priority"] == "low"
+    assert client.get(f"/tasks/{task_id}").json()["priority"] == "low"
+
+
+def test_update_explicit_null_priority_returns_422(client):
+    created = client.post("/tasks", json={"title": "Buy milk", "priority": "high"}).json()
+    task_id = created["id"]
+
+    response = client.patch(f"/tasks/{task_id}", json={"priority": None})
+
+    assert response.status_code == 422
+    # Never silently treated as "leave unchanged" - the priority is untouched.
+    assert client.get(f"/tasks/{task_id}").json()["priority"] == "high"
+
+
+def test_update_unsupported_priority_string_returns_422(client):
+    created = client.post("/tasks", json={"title": "Buy milk"}).json()
+    task_id = created["id"]
+
+    response = client.patch(f"/tasks/{task_id}", json={"priority": "urgent"})
+
+    assert response.status_code == 422
+    assert client.get(f"/tasks/{task_id}").json()["priority"] == "medium"
+
+
+def test_update_omitted_due_date_leaves_it_unchanged(client):
+    created = client.post("/tasks", json={"title": "Buy milk", "due_date": "2026-08-15"}).json()
+    task_id = created["id"]
+
+    response = client.patch(f"/tasks/{task_id}", json={"title": "Buy oat milk"})
+
+    assert response.status_code == 200
+    assert response.json()["due_date"] == "2026-08-15"
+
+
+def test_update_sets_due_date(client):
+    created = client.post("/tasks", json={"title": "Buy milk"}).json()
+    task_id = created["id"]
+    assert created["due_date"] is None
+
+    response = client.patch(f"/tasks/{task_id}", json={"due_date": "2026-09-01"})
+
+    assert response.status_code == 200
+    assert response.json()["due_date"] == "2026-09-01"
+
+
+def test_update_changes_due_date(client):
+    created = client.post("/tasks", json={"title": "Buy milk", "due_date": "2026-08-15"}).json()
+    task_id = created["id"]
+
+    response = client.patch(f"/tasks/{task_id}", json={"due_date": "2026-09-01"})
+
+    assert response.status_code == 200
+    assert response.json()["due_date"] == "2026-09-01"
+
+
+def test_update_explicit_null_due_date_clears_it(client):
+    created = client.post("/tasks", json={"title": "Buy milk", "due_date": "2026-08-15"}).json()
+    task_id = created["id"]
+
+    response = client.patch(f"/tasks/{task_id}", json={"due_date": None})
+
+    assert response.status_code == 200
+    assert response.json()["due_date"] is None
+    assert client.get(f"/tasks/{task_id}").json()["due_date"] is None
+
+
+def test_update_rejects_malformed_due_date(client):
+    created = client.post("/tasks", json={"title": "Buy milk", "due_date": "2026-08-15"}).json()
+    task_id = created["id"]
+
+    response = client.patch(f"/tasks/{task_id}", json={"due_date": "not-a-date"})
+
+    assert response.status_code == 422
+    # Untouched by the rejected request.
+    assert client.get(f"/tasks/{task_id}").json()["due_date"] == "2026-08-15"
+
+
+def test_agent_execute_create_task_result_reflects_default_priority_and_due_date(client):
+    created = client.post("/agent/execute", json={"message": "Add a task to buy milk"}).json()
+
+    assert created["result"]["priority"] == "medium"
+    assert created["result"]["due_date"] is None
+
+
 def test_agent_execute_endpoints_work_with_sqlite(client):
     created = client.post("/agent/execute", json={"message": "Add a task to buy milk"}).json()
     assert created["selected_tool"] == "create_task"

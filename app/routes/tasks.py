@@ -24,7 +24,14 @@ def get_tasks(done: bool | None = None, db: Session = Depends(get_db), current_u
 
 @router.post("", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
 def create_task(task_in: TaskCreate, db: Session = Depends(get_db), current_user: AuthenticatedUser = Depends(get_current_user)):
-    return task_service.create_task(db, current_user.user_id, title=task_in.title, description=task_in.description)
+    return task_service.create_task(
+        db,
+        current_user.user_id,
+        title=task_in.title,
+        description=task_in.description,
+        priority=task_in.priority,
+        due_date=task_in.due_date,
+    )
 
 
 @router.get("/{task_id}", response_model=TaskResponse)
@@ -42,7 +49,23 @@ def update_task(
     db: Session = Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
-    task = task_service.update_task(db, current_user.user_id, task_id, title=task_in.title, description=task_in.description)
+    # due_date is genuinely tri-state (omitted = unchanged, explicit null
+    # = clear) - only pass it through at all when the request actually
+    # included the key, so task_service.update_task's _UNSET sentinel
+    # default correctly means "leave unchanged" for every other caller.
+    due_date_kwargs = {}
+    if "due_date" in task_in.model_fields_set:
+        due_date_kwargs["due_date"] = task_in.due_date
+
+    task = task_service.update_task(
+        db,
+        current_user.user_id,
+        task_id,
+        title=task_in.title,
+        description=task_in.description,
+        priority=task_in.priority,
+        **due_date_kwargs,
+    )
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
     return task

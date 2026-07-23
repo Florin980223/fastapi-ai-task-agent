@@ -17,12 +17,19 @@ from app.services.agent_decision import ToolDecision
 
 def _task_to_dict(task) -> dict:
     """Convert an internal Task object into a plain JSON-friendly dict."""
+    # mode="json" so due_date (a real datetime.date on the ORM object)
+    # comes out as a plain "YYYY-MM-DD" string here, not a date object -
+    # this dict is stored as-is (via jsonable_encoder) in agent_runs'
+    # step trace, so it should already be a JSON-safe primitive rather
+    # than relying on a second encoding pass to catch it.
     return TaskResponse(
         id=task.id,
         title=task.title,
         description=task.description,
         done=task.done,
-    ).model_dump()
+        priority=task.priority,
+        due_date=task.due_date,
+    ).model_dump(mode="json")
 
 
 def _execute_create_task(db: Session, user_id: str, arguments: dict) -> dict:

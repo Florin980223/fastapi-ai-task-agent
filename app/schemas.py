@@ -6,9 +6,12 @@ tasks are stored internally.
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+TaskPriority = Literal["low", "medium", "high"]
 
 
 class TaskCreate(BaseModel):
@@ -16,13 +19,42 @@ class TaskCreate(BaseModel):
 
     title: str = Field(max_length=200)
     description: str | None = Field(default=None, max_length=2000)
+    priority: TaskPriority = "medium"
+    # Preferred format "YYYY-MM-DD" - Pydantic parses/rejects this natively
+    # for a `date`-typed field. No time-of-day or timezone behavior at all.
+    due_date: date | None = Field(default=None)
 
 
 class TaskUpdate(BaseModel):
-    """Shape of the JSON body expected on PATCH /tasks/{task_id}."""
+    """Shape of the JSON body expected on PATCH /tasks/{task_id}.
+
+    title/description/priority: omitting a field (or, for
+    title/description, sending it as null) leaves it unchanged - see
+    app.services.task_service.update_task. priority is the one exception
+    to "null means unchanged": since priority itself can never be null,
+    an explicit `"priority": null` is rejected below rather than silently
+    ignored, so a caller who typos `null` where they meant a real value
+    gets a clear error instead of a silent no-op.
+
+    due_date is genuinely tri-state and needs `model_fields_set` (see
+    routes/tasks.py) to tell "omitted" (leave unchanged) apart from
+    "explicit null" (clear it) - both are valid, meaningfully different
+    outcomes, unlike priority.
+    """
 
     title: str | None = Field(default=None, max_length=200)
     description: str | None = Field(default=None, max_length=2000)
+    priority: TaskPriority | None = Field(default=None)
+    due_date: date | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def _reject_explicit_null_priority(self) -> "TaskUpdate":
+        if "priority" in self.model_fields_set and self.priority is None:
+            raise ValueError(
+                "priority cannot be null - omit it to leave the current priority unchanged, "
+                "or provide 'low', 'medium', or 'high'"
+            )
+        return self
 
 
 class TaskResponse(BaseModel):
@@ -34,6 +66,8 @@ class TaskResponse(BaseModel):
     title: str
     description: str | None = None
     done: bool
+    priority: TaskPriority
+    due_date: date | None = None
 
 
 class WeatherResponse(BaseModel):

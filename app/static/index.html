@@ -62,6 +62,18 @@
             <label for="taskDescriptionInput">Description (optional)</label>
             <textarea id="taskDescriptionInput" name="description" maxlength="2000" rows="2"></textarea>
           </div>
+          <div class="field">
+            <label for="taskPriorityInput">Priority</label>
+            <select id="taskPriorityInput" name="priority">
+              <option value="low">Low</option>
+              <option value="medium" selected>Medium</option>
+              <option value="high">High</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="taskDueDateInput">Due date (optional)</label>
+            <input id="taskDueDateInput" name="due_date" type="date">
+          </div>
           <button type="submit" class="btn btn-primary" id="taskCreateSubmit">Add task</button>
         </form>
 

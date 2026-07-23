@@ -157,6 +157,8 @@ const taskList = document.getElementById("taskList");
 const taskCreateForm = document.getElementById("taskCreateForm");
 const taskTitleInput = document.getElementById("taskTitleInput");
 const taskDescriptionInput = document.getElementById("taskDescriptionInput");
+const taskPriorityInput = document.getElementById("taskPriorityInput");
+const taskDueDateInput = document.getElementById("taskDueDateInput");
 const taskCreateSubmit = document.getElementById("taskCreateSubmit");
 
 const confirmDialog = document.getElementById("confirmDialog");
@@ -165,6 +167,21 @@ const confirmDialogCancel = document.getElementById("confirmDialogCancel");
 const confirmDialogConfirm = document.getElementById("confirmDialogConfirm");
 let pendingDeleteTaskId = null;
 let pendingDeleteTrigger = null;
+
+const PRIORITY_LABELS = { low: "Low", medium: "Medium", high: "High" };
+
+// due_date is a calendar date only ("YYYY-MM-DD"), never a timestamp -
+// deliberately never parsed via `new Date("YYYY-MM-DD")` (parsed as UTC
+// midnight by the JS spec, which can then render as the previous day in
+// any timezone behind UTC) or any other UTC-based conversion. Splitting
+// the components and using the *local-time* Date constructor
+// (new Date(year, monthIndex, day)) means the calendar day displayed is
+// always exactly the day stored, regardless of the viewer's timezone.
+function formatDueDate(isoDate) {
+  const [year, month, day] = isoDate.split("-").map(Number);
+  const local = new Date(year, month - 1, day);
+  return local.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+}
 
 function renderTasks(tasks) {
   taskList.innerHTML = "";
@@ -191,6 +208,24 @@ function renderTasks(tasks) {
       desc.textContent = task.description;
       info.appendChild(desc);
     }
+
+    const meta = document.createElement("div");
+    meta.className = "task-meta";
+
+    const priorityBadge = document.createElement("span");
+    priorityBadge.className = "priority-badge";
+    priorityBadge.dataset.priority = task.priority;
+    priorityBadge.textContent = PRIORITY_LABELS[task.priority] || task.priority;
+    meta.appendChild(priorityBadge);
+
+    if (task.due_date) {
+      const due = document.createElement("span");
+      due.className = "task-due-date";
+      due.textContent = `Due ${formatDueDate(task.due_date)}`;
+      meta.appendChild(due);
+    }
+
+    info.appendChild(meta);
     li.appendChild(info);
 
     const actions = document.createElement("div");
@@ -241,7 +276,12 @@ taskCreateForm.addEventListener("submit", async (event) => {
   if (!title) return;
   taskCreateSubmit.disabled = true;
   try {
-    await api.createTask({ title, description: taskDescriptionInput.value.trim() });
+    await api.createTask({
+      title,
+      description: taskDescriptionInput.value.trim(),
+      priority: taskPriorityInput.value,
+      dueDate: taskDueDateInput.value,
+    });
     taskCreateForm.reset();
     showToast("Task added.");
     await loadTasks();
@@ -281,6 +321,21 @@ function onEditTask(li, task) {
   descField.rows = 2;
   descField.setAttribute("aria-label", "Description");
 
+  const priorityField = document.createElement("select");
+  for (const value of ["low", "medium", "high"]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = PRIORITY_LABELS[value];
+    if (value === task.priority) option.selected = true;
+    priorityField.appendChild(option);
+  }
+  priorityField.setAttribute("aria-label", "Priority");
+
+  const dueDateField = document.createElement("input");
+  dueDateField.type = "date";
+  dueDateField.value = task.due_date || "";
+  dueDateField.setAttribute("aria-label", "Due date");
+
   const actions = document.createElement("div");
   actions.className = "task-actions";
 
@@ -299,6 +354,8 @@ function onEditTask(li, task) {
   actions.appendChild(cancelBtn);
   form.appendChild(titleField);
   form.appendChild(descField);
+  form.appendChild(priorityField);
+  form.appendChild(dueDateField);
   form.appendChild(actions);
   li.appendChild(form);
   titleField.focus();
@@ -307,7 +364,18 @@ function onEditTask(li, task) {
     event.preventDefault();
     saveBtn.disabled = true;
     try {
-      await api.updateTask(task.id, { title: titleField.value.trim(), description: descField.value.trim() });
+      // Always sends all four fields (present value or null for a
+      // cleared due date) - same "the edit form resends the whole
+      // editable state on save" convention title/description already
+      // use, which is exactly what exercises the due_date "explicit
+      // null clears it" behavior without needing to detect whether the
+      // user actually touched the field.
+      await api.updateTask(task.id, {
+        title: titleField.value.trim(),
+        description: descField.value.trim(),
+        priority: priorityField.value,
+        dueDate: dueDateField.value,
+      });
       showToast("Task updated.");
       await loadTasks();
     } catch (err) {

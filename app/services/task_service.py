@@ -14,10 +14,20 @@ someone else - the two cases are indistinguishable by design, so a
 caller can never learn whether another user's task id exists.
 """
 
+from datetime import date
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db_models import Task
+
+# Sentinel distinguishing "due_date wasn't passed at all" (leave
+# unchanged) from an explicit `due_date=None` (clear it) - a plain
+# `None` default can't carry that distinction, since None is itself a
+# valid, meaningful due_date value. See routes/tasks.py, which only
+# passes due_date through at all when the caller's request explicitly
+# included it (via TaskUpdate.model_fields_set).
+_UNSET = object()
 
 
 def list_tasks(db: Session, user_id: str, done: bool | None = None) -> list[Task]:
@@ -27,8 +37,15 @@ def list_tasks(db: Session, user_id: str, done: bool | None = None) -> list[Task
     return list(db.scalars(stmt).all())
 
 
-def create_task(db: Session, user_id: str, title: str, description: str | None) -> Task:
-    task = Task(user_id=user_id, title=title, description=description, done=False)
+def create_task(
+    db: Session,
+    user_id: str,
+    title: str,
+    description: str | None,
+    priority: str = "medium",
+    due_date: date | None = None,
+) -> Task:
+    task = Task(user_id=user_id, title=title, description=description, done=False, priority=priority, due_date=due_date)
     db.add(task)
     db.commit()
     db.refresh(task)
@@ -40,7 +57,15 @@ def find_task(db: Session, user_id: str, task_id: int) -> Task | None:
     return db.scalar(stmt)
 
 
-def update_task(db: Session, user_id: str, task_id: int, title: str | None, description: str | None) -> Task | None:
+def update_task(
+    db: Session,
+    user_id: str,
+    task_id: int,
+    title: str | None,
+    description: str | None,
+    priority: str | None = None,
+    due_date=_UNSET,
+) -> Task | None:
     task = find_task(db, user_id, task_id)
     if task is None:
         return None
@@ -48,6 +73,10 @@ def update_task(db: Session, user_id: str, task_id: int, title: str | None, desc
         task.title = title
     if description is not None:
         task.description = description
+    if priority is not None:
+        task.priority = priority
+    if due_date is not _UNSET:
+        task.due_date = due_date
     db.commit()
     db.refresh(task)
     return task
