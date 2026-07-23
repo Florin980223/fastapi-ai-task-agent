@@ -67,6 +67,89 @@ def test_delete_todo_message_is_recognized_as_delete_task():
     assert decision.arguments == {"task_id": 3}
 
 
+# --- Explicit task id must occupy an id-shaped grammatical position -----
+# (task/todo + digits + an expected boundary: "as", "to", punctuation, or
+# end of message) - a number that's part of a title must never be mistaken
+# for an id, even when it directly follows the word "task".
+
+
+def test_mark_task_done_decision_extracts_task_id_with_hash():
+    decision = decide_tool("Mark task #9 as done")
+
+    assert decision.selected_tool == "mark_task_done"
+    assert decision.arguments == {"task_id": 9}
+
+
+def test_delete_task_decision_extracts_task_id_with_hash():
+    decision = decide_tool("Delete task #12")
+
+    assert decision.selected_tool == "delete_task"
+    assert decision.arguments == {"task_id": 12}
+
+
+def test_update_task_decision_extracts_id_and_title_with_hash_and_q3_title():
+    decision = decide_tool("Rename task #4 to Prepare Q3 report")
+
+    assert decision.selected_tool == "update_task"
+    assert decision.arguments == {"task_id": 4, "title": "Prepare Q3 report"}
+
+
+def test_update_task_decision_extracts_id_and_title_containing_q3():
+    decision = decide_tool("Rename task 4 to Prepare Q3 report")
+
+    assert decision.selected_tool == "update_task"
+    assert decision.arguments == {"task_id": 4, "title": "Prepare Q3 report"}
+
+
+def test_mark_task_done_title_containing_q3_extracts_no_task_id():
+    decision = decide_tool("Mark Q3 report as done")
+
+    assert decision.selected_tool == "mark_task_done"
+    assert decision.arguments == {"task_id": None, "task_title": "Q3 report"}
+
+
+def test_delete_task_title_containing_q2_extracts_no_task_id():
+    decision = decide_tool("Delete the Q2 planning task")
+
+    assert decision.selected_tool == "delete_task"
+    assert decision.arguments == {"task_id": None, "task_title": "Q2 planning"}
+
+
+def test_update_task_rename_by_title_to_new_title_containing_q3():
+    decision = decide_tool("Rename the report task to Prepare Q3 report")
+
+    assert decision.selected_tool == "update_task"
+    assert decision.arguments == {"task_id": None, "task_title": "report", "title": "Prepare Q3 report"}
+
+
+def test_year_immediately_after_task_is_not_mistaken_for_an_id():
+    # Boundary case: "task" is immediately followed by digits, but those
+    # digits are the start of a title ("2026 roadmap"), not an id - there's
+    # no "as"/"to"/punctuation/end-of-message right after the number, so it
+    # must not match as an id.
+    decision = decide_tool("Mark task 2026 roadmap as done")
+
+    assert decision.selected_tool == "mark_task_done"
+    assert decision.arguments == {"task_id": None, "task_title": "2026 roadmap"}
+
+
+def test_year_with_no_task_word_is_not_mistaken_for_an_id():
+    decision = decide_tool("Mark Project 2026 roadmap as done")
+
+    assert decision.selected_tool == "mark_task_done"
+    assert decision.arguments == {"task_id": None, "task_title": "Project 2026 roadmap"}
+
+
+def test_digits_glued_to_trailing_letters_are_not_mistaken_for_an_id():
+    # "9abc" is not an id-shaped boundary (no "as"/"to"/punctuation/end
+    # right after the digits) - task_id must stay None, and the digits
+    # fall through to plain title text like any other title content.
+    decision = decide_tool("Mark task 9abc as done")
+
+    assert decision.selected_tool == "mark_task_done"
+    assert decision.arguments == {"task_id": None, "task_title": "9abc"}
+
+
 def test_mark_task_done_decision_extracts_task_title_when_no_digit():
     decision = decide_tool("Mark the client presentation task as done")
 

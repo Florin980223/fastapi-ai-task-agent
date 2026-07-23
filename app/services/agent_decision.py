@@ -179,16 +179,35 @@ def _extract_city(message: str) -> str | None:
     return None
 
 
-def _extract_task_id(message: str) -> int | None:
-    """Pull a task id out of a message, e.g. "Mark task 1 as done" -> 1.
+# An explicit task id must sit in an ID-shaped grammatical position: right
+# after the word "task"/"todo" (optionally with a "#" and/or whitespace in
+# between - "task 9", "task #9", "task#9", "todo 3"), AND immediately
+# followed by an expected command boundary/connector - "as"/"to" (as their
+# own word, via \b, so "assignment"/"total" never count), a punctuation
+# mark, or the end of the message. Without that trailing boundary check, a
+# title's own leading number - "task 2026 roadmap", "task 9abc" - would
+# wrongly look like an id just because it happens to follow the word
+# "task". Digits with no task/todo word before them (e.g. "Q3", "2026" in
+# "Mark Project 2026 roadmap as done") never match at all, regardless of
+# this trailing-boundary check - see the update to _build_arguments's
+# docstring-adjacent tests for the exact scenarios this covers.
+_TASK_ID_PATTERN = re.compile(r"\b(?:task|todo)\s*#?\s*(\d+)(?=\s+as\b|\s+to\b|[.,!?]|\s*$)", re.IGNORECASE)
 
-    Returns the first run of digits found in the message, or None if
-    there are no digits at all.
+
+def _extract_task_id(message: str) -> int | None:
+    """Pull an explicit task id out of a message, e.g. "Mark task 1 as
+    done" -> 1, "Delete task #12" -> 12, "Delete todo 3" -> 3.
+
+    Only matches a run of digits that both follows "task"/"todo" and is
+    followed by an expected command boundary (see _TASK_ID_PATTERN) - a
+    number that's part of a title, e.g. "Mark task 2026 roadmap as done"
+    or "Mark Q3 report as done", is never mistaken for an id. Returns None
+    if no such id-shaped reference is found.
     """
-    match = re.search(r"\d+", message)
+    match = _TASK_ID_PATTERN.search(message)
     if match is None:
         return None
-    return int(match.group())
+    return int(match.group(1))
 
 
 # Filler phrases stripped (in order) when turning a mark_task_done/

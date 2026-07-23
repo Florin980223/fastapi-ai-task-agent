@@ -275,6 +275,27 @@ def test_update_task_by_title_resolves_and_applies_new_title(client):
     assert data["result"]["title"] == "Prepare summer portfolio"
 
 
+def test_update_task_by_title_resolves_to_new_title_containing_q3(client):
+    _execute(client, "Add a task to Prepare final portfolio")
+
+    data = _execute(client, "Rename the portfolio task to Prepare Q3 report")
+
+    assert data["selected_tool"] == "update_task"
+    assert data["needs_clarification"] is False
+    assert data["result"]["title"] == "Prepare Q3 report"
+
+
+def test_update_task_by_explicit_id_to_new_title_containing_q3(client):
+    created = _execute(client, "Add a task to Prepare final portfolio")
+    task_id = created["result"]["id"]
+
+    data = _execute(client, f"Rename task {task_id} to Prepare Q3 report")
+
+    assert data["selected_tool"] == "update_task"
+    assert data["needs_clarification"] is False
+    assert data["result"]["title"] == "Prepare Q3 report"
+
+
 def test_digit_based_flows_are_unaffected_by_title_resolution(client, monkeypatch):
     from app.services import task_service
 
