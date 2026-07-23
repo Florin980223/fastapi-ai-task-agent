@@ -100,7 +100,7 @@ def test_alembic_upgrade_head_reaches_baseline(migrated_engine):
 
     with migrated_engine.connect() as connection:
         current = MigrationContext.configure(connection).get_current_revision()
-    assert current == "0002_add_task_priority_and_due_date"
+    assert current == "0002_task_priority_due_date"
 
 
 def test_task_roundtrip_against_real_postgresql(session):

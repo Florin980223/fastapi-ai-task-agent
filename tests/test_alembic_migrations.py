@@ -22,6 +22,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
 
 from app.config import UNMIGRATED_USER_ID
@@ -133,7 +134,7 @@ def test_fresh_database_upgrade_to_head_creates_expected_schema(tmp_path):
     assert set(unique_constraints[0]["column_names"]) == {"user_id", "conversation_id"}
 
     current = MigrationContext.configure(engine.connect()).get_current_revision()
-    assert current == "0002_add_task_priority_and_due_date"
+    assert current == "0002_task_priority_due_date"
     engine.dispose()
 
 
@@ -209,7 +210,7 @@ def test_legacy_database_adoption_preserves_all_rows(tmp_path):
     assert rows[1].due_date is None
 
     current = MigrationContext.configure(engine.connect()).get_current_revision()
-    assert current == "0002_add_task_priority_and_due_date"
+    assert current == "0002_task_priority_due_date"
     engine.dispose()
 
 
@@ -238,7 +239,7 @@ def test_already_current_database_is_verified_and_stamped_without_recreating_tab
     assert rows[0].title == "Buy milk"
 
     current = MigrationContext.configure(engine.connect()).get_current_revision()
-    assert current == "0002_add_task_priority_and_due_date"
+    assert current == "0002_task_priority_due_date"
     engine.dispose()
 
 
@@ -282,7 +283,7 @@ def test_baseline_matches_current_orm_metadata(tmp_path):
     command.check(cfg)
 
 
-# --- 5b. 0002_add_task_priority_and_due_date: upgrade/downgrade safety -------
+# --- 5b. 0002_task_priority_due_date: upgrade/downgrade safety -------
 
 
 def test_0002_upgrade_backfills_existing_rows_with_medium_priority(tmp_path):
@@ -356,6 +357,50 @@ def test_0002_downgrade_removes_only_priority_and_due_date_preserving_rows(tmp_p
     assert row.priority == "medium"
     assert row.due_date is None
     engine.dispose()
+
+
+# --- 5c. Revision id length safety (PostgreSQL alembic_version.version_num --
+# is VARCHAR(32) - see below) --------------------------------------------------
+
+
+def test_all_revision_ids_fit_in_postgres_varchar_32():
+    """Regression test for a real production incident: revision id
+    "0002_add_task_priority_and_due_date" (35 characters) exceeded
+    PostgreSQL's alembic_version.version_num column, which is
+    VARCHAR(32) in every standard Alembic-generated alembic_version
+    table (see alembic/env.py - this project never overrides that
+    column). PostgreSQL raised StringDataRightTruncation and rolled the
+    entire migration back, leaving the database at 0001_baseline with
+    neither priority nor due_date ever applied - see
+    0002_task_priority_due_date.py's docstring for the full incident.
+    SQLite has no such limit, so this was invisible in every SQLite-only
+    test until it hit real PostgreSQL - hence a dedicated, permanent
+    check here rather than relying on a database-specific failure to
+    catch it again.
+
+    Also confirms every revision id is unique (a duplicate would silently
+    corrupt Alembic's revision graph) and that the expected head is
+    "0002_task_priority_due_date" - so a future revision addition that
+    forgets to update this expectation is caught immediately too.
+    """
+    cfg = Config(str(_ALEMBIC_INI))
+    cfg.set_main_option("script_location", str(_ALEMBIC_DIR))
+    script = ScriptDirectory.from_config(cfg)
+
+    revisions = list(script.walk_revisions())
+    assert revisions, "expected at least one Alembic revision to exist"
+
+    revision_ids = [rev.revision for rev in revisions]
+
+    too_long = [rid for rid in revision_ids if len(rid) > 32]
+    assert too_long == [], (
+        "revision id(s) exceed PostgreSQL's alembic_version.version_num "
+        f"VARCHAR(32) limit and would break real Postgres migrations: {too_long}"
+    )
+
+    assert len(revision_ids) == len(set(revision_ids)), f"revision ids must be unique, got: {revision_ids}"
+
+    assert script.get_current_head() == "0002_task_priority_due_date"
 
 
 # --- 6. app.database.init_db() / ensure_schema_is_current --------------------

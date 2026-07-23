@@ -260,7 +260,7 @@ def test_adopt_legacy_leaves_diff_empty_and_stamps_head(tmp_path):
         assert diff_against_baseline(engine) == []
         with engine.connect() as connection:
             stamped = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        assert stamped == "0002_add_task_priority_and_due_date"
+        assert stamped == "0002_task_priority_due_date"
     finally:
         engine.dispose()
 

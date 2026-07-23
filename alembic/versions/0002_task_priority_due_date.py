@@ -26,9 +26,21 @@ DROP COLUMN directly on backends that support it natively
 verified in tests/test_alembic_migrations.py against temporary
 databases only.
 
-Revision ID: 0002_add_task_priority_and_due_date
+Revision ID: 0002_task_priority_due_date
 Revises: 0001_baseline
 Create Date: 2026-07-23
+
+Note on the revision id itself: the original id chosen for this
+revision, "0002_add_task_priority_and_due_date" (35 characters), broke
+production PostgreSQL - alembic_version.version_num is
+VARCHAR(32) (see alembic/env.py / the standard Alembic-generated
+alembic_version table), so PostgreSQL rejected the INSERT with
+StringDataRightTruncation and rolled the whole migration back,
+leaving the database at 0001_baseline with neither new column ever
+applied. Renamed to this 27-character id - see
+tests/test_alembic_migrations.py::test_all_revision_ids_fit_in_postgres_varchar_32
+for the regression test that now guards every revision id (including
+this one and 0001_baseline) against this ever recurring.
 
 """
 
@@ -39,7 +51,7 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0002_add_task_priority_and_due_date"
+revision: str = "0002_task_priority_due_date"
 down_revision: Union[str, None] = "0001_baseline"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
